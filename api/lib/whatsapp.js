@@ -99,3 +99,19 @@ export function sendDocumentDone(to, documentLabel, allowSkip = false) {
     },
   });
 }
+
+export function sendYesNoMenu(to, body, yesId = "yes", noId = "no") {
+  return sendMessage(to, {
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text: body },
+      action: {
+        buttons: [
+          { type: "reply", reply: { id: yesId, title: "Так" } },
+          { type: "reply", reply: { id: noId, title: "Ні" } },
+        ],
+      },
+    },
+  });
+}
