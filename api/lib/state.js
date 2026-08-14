@@ -74,8 +74,6 @@ export async function saveUserState(phone, state) {
     updatedAt: new Date().toISOString(),
   };
 
-  // Redis is temporary session storage, not document storage.
-  // Active conversations expire after 7 days of inactivity.
   await redis.set(stateKey(phone), JSON.stringify(nextState), {
     EX: STATE_TTL_SECONDS,
   });
@@ -125,18 +123,25 @@ export async function getApplicantProfile(phone) {
 
 export async function saveApplicantProfile(phone, request) {
   const redis = await getRedis();
+  const previous = await getApplicantProfile(phone);
   const now = new Date().toISOString();
+
+  // If the applicant reused existing documents, keep their original update
+  // date. Only a newly uploaded document set refreshes this date.
+  const documentsWereUpdated = !request.usingSavedData;
+  const lastDocumentsUpdatedAt = documentsWereUpdated
+    ? now
+    : (previous?.lastDocumentsUpdatedAt || request.savedDocumentsUpdatedAt || now);
 
   const profile = {
     phone,
     type: request.type,
     data: { ...(request.data || {}), phone },
     documents: request.documents || {},
-    lastDocumentsUpdatedAt: now,
+    lastDocumentsUpdatedAt,
     updatedAt: now,
   };
 
-  // Applicant profiles are persistent data, separate from the 7-day session.
   await redis.set(profileKey(phone), JSON.stringify(profile));
   return profile;
 }
