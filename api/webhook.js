@@ -9,6 +9,7 @@ import {
   sendDocumentDone,
   sendMainMenu,
   sendText,
+  sendYesNoMenu,
 } from "./lib/whatsapp.js";
 
 const PHYSICAL_DOCUMENTS = [
@@ -39,16 +40,63 @@ function getMediaId(message) {
   return null;
 }
 
+function formatSummary(state) {
+  const request = state.request || {};
+  const data = request.data || {};
+  const documents = request.documents || {};
+  const documentCount = Object.values(documents).reduce(
+    (total, files) => total + (Array.isArray(files) ? files.length : 0),
+    0
+  );
+
+  const lines = [
+    "Перевірте, будь ласка, дані заявки:",
+    "",
+    `Тип заявника: ${request.type === "individual" ? "Фізична особа" : "Військова частина"}`,
+    `ПІБ: ${data.name || "—"}`,
+    `Телефон: ${data.phone || state.phone || "—"}`,
+  ];
+
+  if (request.type === "military_unit") {
+    lines.push(`Номер військової частини: ${data.militaryUnitNumber || "—"}`);
+  } else {
+    lines.push(`Місто: ${data.city || "—"}`);
+    lines.push(`Відділення Нової пошти: ${data.novaPoshtaBranch || "—"}`);
+
+    if (data.recipientAnotherPerson) {
+      lines.push(`Отримувач: ${data.recipientName || "—"}`);
+      lines.push(`Телефон отримувача: ${data.recipientPhone || "—"}`);
+    } else {
+      lines.push("Отримувач: заявник");
+    }
+  }
+
+  lines.push(`Документів отримано: ${documentCount}`);
+  lines.push("");
+  lines.push(`Потреба: ${data.need || "—"}`);
+  lines.push("");
+  lines.push("Якщо все правильно, підтвердіть заявку.");
+
+  return lines.join("\n");
+}
+
 async function askForCurrentDocument(from, state) {
   const doc = currentDocument(state);
 
   if (!doc) {
-    state.stage = "DOCUMENTS_COMPLETE";
+    state.stage = "POST_DOCUMENT_DATA";
     await saveUserState(from, state);
-    await sendText(
-      from,
-      "Дякую. Необхідні документи зафіксовано. Наступним етапом продовжимо збір даних заявки."
-    );
+
+    if (state.request.type === "military_unit") {
+      state.stage = "MILITARY_UNIT_NUMBER";
+      await saveUserState(from, state);
+      await sendText(from, "Вкажіть, будь ласка, номер військової частини.");
+    } else {
+      state.stage = "CITY";
+      await saveUserState(from, state);
+      await sendText(from, "Вкажіть, будь ласка, місто, до якого потрібно оформити отримання.");
+    }
+
     return;
   }
 
@@ -60,6 +108,22 @@ async function askForCurrentDocument(from, state) {
     from,
     `Будь ласка, надішліть ${doc.label}.${optionalText}\n\nМожна надіслати один або кілька файлів/фото цього документа. Після того як усе надіслано, натисніть «Готово».`
   );
+}
+
+async function finishRecipientChoice(from, state, anotherPerson) {
+  state.request.data.recipientAnotherPerson = anotherPerson;
+
+  if (anotherPerson) {
+    state.stage = "RECIPIENT_NAME";
+    await saveUserState(from, state);
+    await sendText(from, "Вкажіть, будь ласка, ПІБ іншого отримувача.");
+    return;
+  }
+
+  state.stage = "CONFIRMATION";
+  await saveUserState(from, state);
+  await sendText(from, formatSummary(state));
+  await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
 }
 
 export default async function handler(req, res) {
@@ -99,8 +163,6 @@ export default async function handler(req, res) {
       console.log("Button:", buttonId);
       console.log("Media ID:", mediaId);
 
-      // TEST COMMAND: reset the current Redis session.
-      // Remove this command before production if unrestricted reset is not desired.
       if (text.toLowerCase() === "/reset" || text.toLowerCase() === "reset") {
         await resetUserState(from);
         await sendText(from, "Тестову сесію скинуто. Починаємо заново.");
@@ -120,14 +182,14 @@ export default async function handler(req, res) {
 
       if (!state) {
         state = await createUserState(from);
+        state.request = { data: { phone: from } };
+        state.stage = "MAIN_MENU";
+        await saveUserState(from, state);
 
         await sendText(
           from,
           "Вітаємо! Це бот для автоматизованого оформлення запитів.\n\nСпочатку ми визначимо заявника, потім уточнимо потребу та послідовно зберемо необхідні дані й документи. Після перевірки ви підтвердите заявку, а далі нею займатиметься оператор.\n\nОберіть потрібну дію нижче."
         );
-
-        state.stage = "MAIN_MENU";
-        await saveUserState(from, state);
         await sendMainMenu(from);
         return res.status(200).send("EVENT_RECEIVED");
       }
@@ -149,7 +211,7 @@ export default async function handler(req, res) {
         state.stage = "APPLICANT_TYPE";
         state.request = {
           type: null,
-          data: {},
+          data: { phone: from },
           documents: {},
           documentIndex: 0,
         };
@@ -245,15 +307,106 @@ export default async function handler(req, res) {
         }
       }
 
+      if (state.stage === "MILITARY_UNIT_NUMBER" && text) {
+        state.request.data.militaryUnitNumber = text;
+        state.stage = "CONFIRMATION";
+        await saveUserState(from, state);
+        await sendText(from, formatSummary(state));
+        await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+
+      if (state.stage === "CITY" && text) {
+        state.request.data.city = text;
+        state.stage = "NOVA_POSHTA_BRANCH";
+        await saveUserState(from, state);
+        await sendText(from, "Вкажіть, будь ласка, номер або адресу відділення Нової пошти.");
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+
+      if (state.stage === "NOVA_POSHTA_BRANCH" && text) {
+        state.request.data.novaPoshtaBranch = text;
+        state.stage = "RECIPIENT_CHOICE";
+        await saveUserState(from, state);
+        await sendYesNoMenu(
+          from,
+          "Чи буде отримувачем інша особа?",
+          "recipient_other_yes",
+          "recipient_other_no"
+        );
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+
+      if (state.stage === "RECIPIENT_CHOICE") {
+        if (buttonId === "recipient_other_yes") {
+          await finishRecipientChoice(from, state, true);
+          return res.status(200).send("EVENT_RECEIVED");
+        }
+
+        if (buttonId === "recipient_other_no") {
+          await finishRecipientChoice(from, state, false);
+          return res.status(200).send("EVENT_RECEIVED");
+        }
+
+        await sendYesNoMenu(
+          from,
+          "Чи буде отримувачем інша особа?",
+          "recipient_other_yes",
+          "recipient_other_no"
+        );
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+
+      if (state.stage === "RECIPIENT_NAME" && text) {
+        state.request.data.recipientName = text;
+        state.stage = "RECIPIENT_PHONE";
+        await saveUserState(from, state);
+        await sendText(from, "Вкажіть, будь ласка, номер телефону іншого отримувача.");
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+
+      if (state.stage === "RECIPIENT_PHONE" && text) {
+        state.request.data.recipientPhone = text;
+        state.stage = "CONFIRMATION";
+        await saveUserState(from, state);
+        await sendText(from, formatSummary(state));
+        await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+
+      if (state.stage === "CONFIRMATION") {
+        if (buttonId === "confirm_request") {
+          state.stage = "CONFIRMED";
+          state.request.confirmedAt = new Date().toISOString();
+          await saveUserState(from, state);
+          await sendText(
+            from,
+            "Дякуємо. Заявку підтверджено. Наступним етапом вона буде передана на обробку оператору."
+          );
+          return res.status(200).send("EVENT_RECEIVED");
+        }
+
+        if (buttonId === "edit_request") {
+          await sendText(
+            from,
+            "Редагування заявки ми ще не підключили. Поки що для нового проходження скористайтеся командою /reset."
+          );
+          return res.status(200).send("EVENT_RECEIVED");
+        }
+
+        await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+
       if (state.stage === "OPERATOR") {
         console.log("Operator mode message from:", from);
         return res.status(200).send("EVENT_RECEIVED");
       }
 
-      if (state.stage === "DOCUMENTS_COMPLETE") {
+      if (state.stage === "CONFIRMED") {
         await sendText(
           from,
-          "Документи вже зафіксовано. Наступним кроком продовжимо збір даних заявки."
+          "Заявку вже підтверджено. Якщо потрібно почати новий запит, скористайтеся командою /reset під час тестування."
         );
         return res.status(200).send("EVENT_RECEIVED");
       }
