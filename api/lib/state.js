@@ -43,6 +43,10 @@ function requestCounterKey() {
   return `requests:counter:${new Date().getUTCFullYear()}`;
 }
 
+function documentAckKey(phone, documentKey) {
+  return `wa:doc-ack:${phone}:${documentKey}`;
+}
+
 export async function getUserState(phone) {
   const redis = await getRedis();
   const raw = await redis.get(stateKey(phone));
@@ -87,6 +91,24 @@ export async function createUserState(phone) {
 export async function resetUserState(phone) {
   const redis = await getRedis();
   await redis.del(stateKey(phone));
+
+  // Remove temporary document acknowledgement locks used during testing.
+  const keys = await redis.keys(`wa:doc-ack:${phone}:*`);
+  if (keys.length) await redis.del(keys);
+}
+
+export async function claimDocumentAcknowledgement(phone, documentKey) {
+  const redis = await getRedis();
+
+  // SET NX is atomic. This prevents two WhatsApp webhook invocations that
+  // arrive concurrently for multiple selected files from both sending the
+  // same acknowledgement.
+  const result = await redis.set(documentAckKey(phone, documentKey), "1", {
+    NX: true,
+    EX: STATE_TTL_SECONDS,
+  });
+
+  return result === "OK";
 }
 
 export async function createApplicationNumber() {
