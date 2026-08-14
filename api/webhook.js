@@ -1,13 +1,16 @@
 import {
   createUserState,
+  getApplicantProfile,
   getUserState,
   resetUserState,
+  saveApplicantProfile,
   saveUserState,
 } from "./lib/state.js";
 import {
   sendApplicantTypeMenu,
   sendDocumentDone,
   sendMainMenu,
+  sendReturningApplicantMenu,
   sendText,
   sendYesNoMenu,
 } from "./lib/whatsapp.js";
@@ -33,15 +36,48 @@ function mediaId(message) {
   if (message.type === "document") return message.document?.id || null;
   return null;
 }
+function documentsAreOlderThanYear(dateString) {
+  if (!dateString) return true;
+  const updated = new Date(dateString).getTime();
+  if (!Number.isFinite(updated)) return true;
+  return Date.now() - updated > 365 * 24 * 60 * 60 * 1000;
+}
+
+async function showConfirmation(from, state) {
+  state.stage = "CONFIRMATION";
+  await saveUserState(from, state);
+  await sendText(from, summary(state));
+  await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
+}
+
+async function continueAfterSavedData(from, state) {
+  if (!state.request.documents || !Object.keys(state.request.documents).length) {
+    await showConfirmation(from, state);
+    return;
+  }
+
+  if (documentsAreOlderThanYear(state.request.savedDocumentsUpdatedAt)) {
+    state.stage = "DOCUMENT_UPDATE_DECISION";
+    await saveUserState(from, state);
+    await sendYesNoMenu(
+      from,
+      "Ваші документи були оновлені понад рік тому. Бажаєте завантажити актуальні документи?",
+      "update_documents_yes",
+      "update_documents_no"
+    );
+    return;
+  }
+
+  await showConfirmation(from, state);
+}
 
 async function askDocument(from, state) {
   const doc = currentDoc(state);
   if (!doc) {
     if (state.request.type === "military_unit") {
-      state.stage = "CONFIRMATION";
-      await saveUserState(from, state);
-      await sendText(from, summary(state));
-      await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
+      await showConfirmation(from, state);
+    } else if (state.request.usingSavedData) {
+      await showConfirmation(from, state);
     } else {
       state.stage = "CITY";
       await saveUserState(from, state);
@@ -84,10 +120,7 @@ async function recipientChoice(from, state, another) {
     await sendText(from, "Вкажіть, будь ласка, ПІБ іншого отримувача.");
     return;
   }
-  state.stage = "CONFIRMATION";
-  await saveUserState(from, state);
-  await sendText(from, summary(state));
-  await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
+  await showConfirmation(from, state);
 }
 
 export default async function handler(req, res) {
@@ -155,10 +188,56 @@ export default async function handler(req, res) {
     if (state.stage === "APPLICANT_TYPE") {
       if (buttonId === "individual" || buttonId === "military_unit") {
         state.request.type = buttonId === "individual" ? "individual" : "military_unit";
+
+        if (buttonId === "individual") {
+          const profile = await getApplicantProfile(from);
+          if (profile) {
+            state.request.profile = profile;
+            state.stage = "RETURNING_CHOICE";
+            await saveUserState(from, state);
+            await sendReturningApplicantMenu(from, profile.lastDocumentsUpdatedAt);
+            return res.status(200).send("EVENT_RECEIVED");
+          }
+        }
+
         state.stage = "IDENTIFICATION";
         await saveUserState(from, state);
         await sendText(from, buttonId === "individual" ? "Для ідентифікації заявника вкажіть, будь ласка, ваше ПІБ." : "Для ідентифікації заявника вкажіть, будь ласка, ПІБ відповідальної особи.");
       } else await sendApplicantTypeMenu(from);
+      return res.status(200).send("EVENT_RECEIVED");
+    }
+
+    if (state.stage === "RETURNING_CHOICE") {
+      const profile = state.request.profile;
+      if (!profile) {
+        state.stage = "IDENTIFICATION";
+        await saveUserState(from, state);
+        await sendText(from, "Для ідентифікації заявника вкажіть, будь ласка, ваше ПІБ.");
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+
+      if (buttonId === "use_saved_data") {
+        state.request.type = "individual";
+        state.request.data = { ...(profile.data || {}), phone: from };
+        state.request.documents = JSON.parse(JSON.stringify(profile.documents || {}));
+        state.request.documentIndex = 0;
+        state.request.savedDocumentsUpdatedAt = profile.lastDocumentsUpdatedAt;
+        state.request.usingSavedData = true;
+        state.stage = "REQUEST_TYPE";
+        await saveUserState(from, state);
+        await sendText(from, "Збережені дані використано. Тепер напишіть, будь ласка, який саме запит ви хочете подати.");
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+
+      if (buttonId === "enter_data_again") {
+        state.request = { type: "individual", data: { phone: from }, documents: {}, documentIndex: 0 };
+        state.stage = "IDENTIFICATION";
+        await saveUserState(from, state);
+        await sendText(from, "Введіть, будь ласка, ПІБ заново.");
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+
+      await sendReturningApplicantMenu(from, profile.lastDocumentsUpdatedAt);
       return res.status(200).send("EVENT_RECEIVED");
     }
 
@@ -176,7 +255,6 @@ export default async function handler(req, res) {
       return res.status(200).send("EVENT_RECEIVED");
     }
 
-    // ВЧ: номер військової частини перед завантаженням офіційного запиту.
     if (state.stage === "MILITARY_UNIT_NUMBER" && text) {
       state.request.data.militaryUnitNumber = text;
       state.stage = "REQUEST_TYPE";
@@ -187,10 +265,32 @@ export default async function handler(req, res) {
 
     if (state.stage === "REQUEST_TYPE" && text) {
       state.request.data.need = text;
-      state.stage = "DOCUMENTS";
-      state.request.documentIndex = 0;
-      await saveUserState(from, state);
-      await askDocument(from, state);
+
+      if (state.request.usingSavedData && state.request.documents && Object.keys(state.request.documents).length) {
+        await saveUserState(from, state);
+        await continueAfterSavedData(from, state);
+      } else {
+        state.stage = "DOCUMENTS";
+        state.request.documentIndex = 0;
+        await saveUserState(from, state);
+        await askDocument(from, state);
+      }
+      return res.status(200).send("EVENT_RECEIVED");
+    }
+
+    if (state.stage === "DOCUMENT_UPDATE_DECISION") {
+      if (buttonId === "update_documents_yes") {
+        state.request.documents = {};
+        state.request.documentIndex = 0;
+        state.request.usingSavedData = false;
+        state.stage = "DOCUMENTS";
+        await saveUserState(from, state);
+        await askDocument(from, state);
+      } else if (buttonId === "update_documents_no") {
+        await showConfirmation(from, state);
+      } else {
+        await sendYesNoMenu(from, "Ваші документи були оновлені понад рік тому. Бажаєте завантажити актуальні документи?", "update_documents_yes", "update_documents_no");
+      }
       return res.status(200).send("EVENT_RECEIVED");
     }
 
@@ -203,13 +303,10 @@ export default async function handler(req, res) {
 
       if (fileId) {
         if (!state.request.documents[doc.key]) state.request.documents[doc.key] = [];
-        const firstFile = state.request.documents[doc.key].length === 0;
         state.request.documents[doc.key].push({ mediaId: fileId, type: message.type, receivedAt: new Date().toISOString() });
         await saveUserState(from, state);
 
-        // «Готово» показуємо тільки після першого файлу цього документа.
-        // Наступні фото/файли просто накопичуються без дублювання повідомлення.
-        if (firstFile) await sendDocumentDone(from, doc.label, Boolean(doc.optional));
+        await sendDocumentDone(from, doc.label, Boolean(doc.optional));
         return res.status(200).send("EVENT_RECEIVED");
       }
 
@@ -266,18 +363,17 @@ export default async function handler(req, res) {
 
     if (state.stage === "RECIPIENT_PHONE" && text) {
       state.request.data.recipientPhone = text;
-      state.stage = "CONFIRMATION";
-      await saveUserState(from, state);
-      await sendText(from, summary(state));
-      await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
+      await showConfirmation(from, state);
       return res.status(200).send("EVENT_RECEIVED");
     }
 
     if (state.stage === "CONFIRMATION") {
       if (buttonId === "confirm_request") {
-        state.stage = "CONFIRMED";
-        await saveUserState(from, state);
+        if (state.request.type === "individual") {
+          await saveApplicantProfile(from, state.request);
+        }
         await sendText(from, "Заявку підтверджено. Номер заявки буде присвоєно після реєстрації.");
+        await resetUserState(from);
       } else if (buttonId === "edit_request") {
         await sendText(from, "Для тестового режиму використайте /reset, щоб заповнити заявку заново.");
       }
