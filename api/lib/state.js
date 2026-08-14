@@ -1,5 +1,7 @@
 import { createClient } from "redis";
 
+const STATE_TTL_SECONDS = 7 * 24 * 60 * 60;
+
 let client;
 let connectPromise;
 
@@ -62,7 +64,11 @@ export async function saveUserState(phone, state) {
     updatedAt: new Date().toISOString(),
   };
 
-  await redis.set(stateKey(phone), JSON.stringify(nextState));
+  // Redis is temporary session storage, not document storage.
+  // Active conversations expire after 7 days of inactivity.
+  await redis.set(stateKey(phone), JSON.stringify(nextState), {
+    EX: STATE_TTL_SECONDS,
+  });
 
   return nextState;
 }
@@ -74,4 +80,9 @@ export async function createUserState(phone) {
     request: null,
     createdAt: new Date().toISOString(),
   });
+}
+
+export async function resetUserState(phone) {
+  const redis = await getRedis();
+  await redis.del(stateKey(phone));
 }
