@@ -52,25 +52,11 @@ export function sendMainMenu(to) {
     type: "interactive",
     interactive: {
       type: "button",
-      body: {
-        text: "Оберіть, що потрібно зробити:",
-      },
+      body: { text: "Оберіть, що потрібно зробити:" },
       action: {
         buttons: [
-          {
-            type: "reply",
-            reply: {
-              id: "send_request",
-              title: "📤 Відправити запит",
-            },
-          },
-          {
-            type: "reply",
-            reply: {
-              id: "operator",
-              title: "💬 Написати оператору",
-            },
-          },
+          { type: "reply", reply: { id: "send_request", title: "📤 Відправити запит" } },
+          { type: "reply", reply: { id: "operator", title: "💬 Написати оператору" } },
         ],
       },
     },
@@ -82,27 +68,34 @@ export function sendApplicantTypeMenu(to) {
     type: "interactive",
     interactive: {
       type: "button",
-      body: {
-        text: "Хто подає запит?",
-      },
+      body: { text: "Хто подає запит?" },
       action: {
         buttons: [
-          {
-            type: "reply",
-            reply: {
-              id: "individual",
-              title: "👤 Фізична особа",
-            },
-          },
-          {
-            type: "reply",
-            reply: {
-              id: "military_unit",
-              title: "🏢 Військова частина",
-            },
-          },
+          { type: "reply", reply: { id: "individual", title: "👤 Фізична особа" } },
+          { type: "reply", reply: { id: "military_unit", title: "🏢 Військова частина" } },
         ],
       },
+    },
+  });
+}
+
+export function sendDocumentDone(to, documentLabel, allowSkip = false) {
+  const buttons = [
+    { type: "reply", reply: { id: "document_done", title: "✅ Готово" } },
+  ];
+
+  if (allowSkip) {
+    buttons.push({ type: "reply", reply: { id: "document_skip", title: "⏭ Пропустити" } });
+  }
+
+  return sendMessage(to, {
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: {
+        text: `${documentLabel}\n\nФайл отримано. Якщо ви додали всі сторінки/файли цього документа, натисніть «Готово».`,
+      },
+      action: { buttons },
     },
   });
 }
