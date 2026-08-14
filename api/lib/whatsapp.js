@@ -1,3 +1,5 @@
+import { createApplicationNumber, getUserState, resetUserState } from "./state.js";
+
 const GRAPH_VERSION = "v26.0";
 
 function getConfig() {
@@ -40,7 +42,33 @@ async function sendMessage(to, payload) {
   return result;
 }
 
-export function sendText(to, body) {
+export async function sendText(to, body) {
+  // The confirmation text is still called by the existing webhook handler.
+  // Turn that final step into the real completion message and clear the
+  // temporary conversation state after the message is successfully sent.
+  if (body === "Заявку підтверджено. Номер заявки буде присвоєно після реєстрації.") {
+    const requestNumber = await createApplicationNumber();
+
+    const result = await sendMessage(to, {
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: {
+          text: `Заявку прийнято ✅\n\nНомер вашої заявки: ${requestNumber}\n\nДалі із заявкою працюватиме оператор.`,
+        },
+        action: {
+          buttons: [
+            { type: "reply", reply: { id: "send_request", title: "📤 Нова заявка" } },
+            { type: "reply", reply: { id: "operator", title: "💬 Написати оператору" } },
+          ],
+        },
+      },
+    });
+
+    await resetUserState(to);
+    return result;
+  }
+
   return sendMessage(to, {
     type: "text",
     text: { body },
