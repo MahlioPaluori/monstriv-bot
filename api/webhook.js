@@ -1,6 +1,7 @@
 import {
   createUserState,
   getUserState,
+  resetUserState,
   saveUserState,
 } from "./lib/state.js";
 import {
@@ -30,10 +31,6 @@ function getDocumentList(state) {
 function currentDocument(state) {
   const list = getDocumentList(state);
   return list[state.request.documentIndex || 0] || null;
-}
-
-function isMediaMessage(message) {
-  return ["image", "document"].includes(message.type);
 }
 
 function getMediaId(message) {
@@ -101,6 +98,15 @@ export default async function handler(req, res) {
       console.log("Text:", text);
       console.log("Button:", buttonId);
       console.log("Media ID:", mediaId);
+
+      // TEST COMMAND: reset the current Redis session.
+      // Remove this command before production if unrestricted reset is not desired.
+      if (text.toLowerCase() === "/reset" || text.toLowerCase() === "reset") {
+        await resetUserState(from);
+        await sendText(from, "Тестову сесію скинуто. Починаємо заново.");
+        await sendMainMenu(from);
+        return res.status(200).send("EVENT_RECEIVED");
+      }
 
       if (!text && !buttonId && !mediaId) {
         await sendText(
