@@ -1,4 +1,4 @@
-import { createApplicationNumber, getUserState, resetUserState } from "./state.js";
+import { createApplicationNumber, claimDocumentAcknowledgement } from "./state.js";
 
 const GRAPH_VERSION = "v26.0";
 
@@ -65,7 +65,6 @@ export async function sendText(to, body) {
       },
     });
 
-    await resetUserState(to);
     return result;
   }
 
@@ -107,7 +106,13 @@ export function sendApplicantTypeMenu(to) {
   });
 }
 
-export function sendDocumentDone(to, documentLabel, allowSkip = false) {
+export async function sendDocumentDone(to, documentLabel, allowSkip = false) {
+  // WhatsApp may deliver several selected files as separate webhook requests
+  // at nearly the same time. Claim the acknowledgement atomically in Redis so
+  // only one invocation can send the "Файл отримано" message.
+  const claimed = await claimDocumentAcknowledgement(to, documentLabel);
+  if (!claimed) return null;
+
   const buttons = [
     { type: "reply", reply: { id: "document_done", title: "✅ Готово" } },
   ];
