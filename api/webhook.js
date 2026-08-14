@@ -88,9 +88,10 @@ async function askForCurrentDocument(from, state) {
     await saveUserState(from, state);
 
     if (state.request.type === "military_unit") {
-      state.stage = "MILITARY_UNIT_NUMBER";
+      state.stage = "CONFIRMATION";
       await saveUserState(from, state);
-      await sendText(from, "Вкажіть, будь ласка, номер військової частини.");
+      await sendText(from, formatSummary(state));
+      await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
     } else {
       state.stage = "CITY";
       await saveUserState(from, state);
@@ -253,10 +254,28 @@ export default async function handler(req, res) {
 
       if (state.stage === "REQUEST_TYPE" && text) {
         state.request.data.need = text;
+
+        if (state.request.type === "military_unit") {
+          // Для військової частини спочатку отримуємо номер ВЧ,
+          // і лише після цього переходимо до завантаження офіційного запиту.
+          state.stage = "MILITARY_UNIT_NUMBER";
+          await saveUserState(from, state);
+          await sendText(from, "Вкажіть, будь ласка, номер військової частини.");
+        } else {
+          state.stage = "DOCUMENTS";
+          state.request.documentIndex = 0;
+          await saveUserState(from, state);
+          await askForCurrentDocument(from, state);
+        }
+
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+
+      if (state.stage === "MILITARY_UNIT_NUMBER" && text) {
+        state.request.data.militaryUnitNumber = text;
         state.stage = "DOCUMENTS";
         state.request.documentIndex = 0;
         await saveUserState(from, state);
-
         await askForCurrentDocument(from, state);
         return res.status(200).send("EVENT_RECEIVED");
       }
@@ -305,15 +324,6 @@ export default async function handler(req, res) {
           await askForCurrentDocument(from, state);
           return res.status(200).send("EVENT_RECEIVED");
         }
-      }
-
-      if (state.stage === "MILITARY_UNIT_NUMBER" && text) {
-        state.request.data.militaryUnitNumber = text;
-        state.stage = "CONFIRMATION";
-        await saveUserState(from, state);
-        await sendText(from, formatSummary(state));
-        await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
-        return res.status(200).send("EVENT_RECEIVED");
       }
 
       if (state.stage === "CITY" && text) {
@@ -377,25 +387,15 @@ export default async function handler(req, res) {
       if (state.stage === "CONFIRMATION") {
         if (buttonId === "confirm_request") {
           state.stage = "CONFIRMED";
-          state.request.confirmedAt = new Date().toISOString();
           await saveUserState(from, state);
-          await sendText(
-            from,
-            "Дякуємо. Заявку підтверджено. Наступним етапом вона буде передана на обробку оператору."
-          );
+          await sendText(from, "Заявку підтверджено. Номер заявки буде присвоєно після реєстрації.");
           return res.status(200).send("EVENT_RECEIVED");
         }
 
         if (buttonId === "edit_request") {
-          await sendText(
-            from,
-            "Редагування заявки ми ще не підключили. Поки що для нового проходження скористайтеся командою /reset."
-          );
+          await sendText(from, "Для тестового режиму використайте /reset, щоб заповнити заявку заново.");
           return res.status(200).send("EVENT_RECEIVED");
         }
-
-        await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
-        return res.status(200).send("EVENT_RECEIVED");
       }
 
       if (state.stage === "OPERATOR") {
@@ -404,10 +404,7 @@ export default async function handler(req, res) {
       }
 
       if (state.stage === "CONFIRMED") {
-        await sendText(
-          from,
-          "Заявку вже підтверджено. Якщо потрібно почати новий запит, скористайтеся командою /reset під час тестування."
-        );
+        await sendMainMenu(from);
         return res.status(200).send("EVENT_RECEIVED");
       }
 
