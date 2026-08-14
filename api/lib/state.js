@@ -39,13 +39,15 @@ function stateKey(phone) {
   return `wa:user:${phone}`;
 }
 
+function requestCounterKey() {
+  return `requests:counter:${new Date().getUTCFullYear()}`;
+}
+
 export async function getUserState(phone) {
   const redis = await getRedis();
   const raw = await redis.get(stateKey(phone));
 
-  if (!raw) {
-    return null;
-  }
+  if (!raw) return null;
 
   try {
     return JSON.parse(raw);
@@ -85,4 +87,12 @@ export async function createUserState(phone) {
 export async function resetUserState(phone) {
   const redis = await getRedis();
   await redis.del(stateKey(phone));
+}
+
+export async function createApplicationNumber() {
+  const redis = await getRedis();
+  const year = new Date().getUTCFullYear();
+  const sequence = await redis.incr(requestCounterKey());
+
+  return `${year}-${String(sequence).padStart(6, "0")}`;
 }
