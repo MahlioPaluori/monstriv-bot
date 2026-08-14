@@ -9,6 +9,7 @@ import {
 import {
   sendApplicantTypeMenu,
   sendDocumentDone,
+  sendEditMenu,
   sendMainMenu,
   sendReturningApplicantMenu,
   sendText,
@@ -55,28 +56,19 @@ async function continueAfterSavedData(from, state) {
     await showConfirmation(from, state);
     return;
   }
-
   if (documentsAreOlderThanYear(state.request.savedDocumentsUpdatedAt)) {
     state.stage = "DOCUMENT_UPDATE_DECISION";
     await saveUserState(from, state);
-    await sendYesNoMenu(
-      from,
-      "Ваші документи були оновлені понад рік тому. Бажаєте завантажити актуальні документи?",
-      "update_documents_yes",
-      "update_documents_no"
-    );
+    await sendYesNoMenu(from, "Ваші документи були оновлені понад рік тому. Бажаєте завантажити актуальні документи?", "update_documents_yes", "update_documents_no");
     return;
   }
-
   await showConfirmation(from, state);
 }
 
 async function askDocument(from, state) {
   const doc = currentDoc(state);
   if (!doc) {
-    if (state.request.type === "military_unit") {
-      await showConfirmation(from, state);
-    } else if (state.request.usingSavedData) {
+    if (state.request.type === "military_unit" || state.request.usingSavedData) {
       await showConfirmation(from, state);
     } else {
       state.stage = "CITY";
@@ -85,7 +77,6 @@ async function askDocument(from, state) {
     }
     return;
   }
-
   const optional = doc.optional ? "\n\nЦей документ не є обов'язковим — його можна пропустити." : "";
   await sendText(from, `Будь ласка, надішліть ${doc.label}.${optional}\n\nМожна надіслати один або кілька файлів/фото цього документа. Після того як усе надіслано, натисніть «Готово».`);
 }
@@ -131,7 +122,6 @@ export default async function handler(req, res) {
     if (mode === "subscribe" && token === process.env.WEBHOOK_VERIFY_TOKEN) return res.status(200).send(challenge);
     return res.status(403).send("Forbidden");
   }
-
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   try {
@@ -188,7 +178,6 @@ export default async function handler(req, res) {
     if (state.stage === "APPLICANT_TYPE") {
       if (buttonId === "individual" || buttonId === "military_unit") {
         state.request.type = buttonId === "individual" ? "individual" : "military_unit";
-
         if (buttonId === "individual") {
           const profile = await getApplicantProfile(from);
           if (profile) {
@@ -199,7 +188,6 @@ export default async function handler(req, res) {
             return res.status(200).send("EVENT_RECEIVED");
           }
         }
-
         state.stage = "IDENTIFICATION";
         await saveUserState(from, state);
         await sendText(from, buttonId === "individual" ? "Для ідентифікації заявника вкажіть, будь ласка, ваше ПІБ." : "Для ідентифікації заявника вкажіть, будь ласка, ПІБ відповідальної особи.");
@@ -215,7 +203,6 @@ export default async function handler(req, res) {
         await sendText(from, "Для ідентифікації заявника вкажіть, будь ласка, ваше ПІБ.");
         return res.status(200).send("EVENT_RECEIVED");
       }
-
       if (buttonId === "use_saved_data") {
         state.request.type = "individual";
         state.request.data = { ...(profile.data || {}), phone: from };
@@ -228,7 +215,6 @@ export default async function handler(req, res) {
         await sendText(from, "Збережені дані використано. Тепер напишіть, будь ласка, який саме запит ви хочете подати.");
         return res.status(200).send("EVENT_RECEIVED");
       }
-
       if (buttonId === "enter_data_again") {
         state.request = { type: "individual", data: { phone: from }, documents: {}, documentIndex: 0 };
         state.stage = "IDENTIFICATION";
@@ -236,7 +222,6 @@ export default async function handler(req, res) {
         await sendText(from, "Введіть, будь ласка, ПІБ заново.");
         return res.status(200).send("EVENT_RECEIVED");
       }
-
       await sendReturningApplicantMenu(from, profile.lastDocumentsUpdatedAt);
       return res.status(200).send("EVENT_RECEIVED");
     }
@@ -265,7 +250,6 @@ export default async function handler(req, res) {
 
     if (state.stage === "REQUEST_TYPE" && text) {
       state.request.data.need = text;
-
       if (state.request.usingSavedData && state.request.documents && Object.keys(state.request.documents).length) {
         await saveUserState(from, state);
         await continueAfterSavedData(from, state);
@@ -300,16 +284,13 @@ export default async function handler(req, res) {
         await askDocument(from, state);
         return res.status(200).send("EVENT_RECEIVED");
       }
-
       if (fileId) {
         if (!state.request.documents[doc.key]) state.request.documents[doc.key] = [];
         state.request.documents[doc.key].push({ mediaId: fileId, type: message.type, receivedAt: new Date().toISOString() });
         await saveUserState(from, state);
-
         await sendDocumentDone(from, doc.label, Boolean(doc.optional));
         return res.status(200).send("EVENT_RECEIVED");
       }
-
       if (buttonId === "document_done") {
         const files = state.request.documents[doc.key] || [];
         if (!files.length) {
@@ -321,7 +302,6 @@ export default async function handler(req, res) {
         await askDocument(from, state);
         return res.status(200).send("EVENT_RECEIVED");
       }
-
       if (buttonId === "document_skip" && doc.optional) {
         state.request.documentIndex += 1;
         await saveUserState(from, state);
@@ -367,15 +347,87 @@ export default async function handler(req, res) {
       return res.status(200).send("EVENT_RECEIVED");
     }
 
+    // Editing data before final confirmation.
+    if (state.stage === "CONFIRMATION" && buttonId === "edit_request") {
+      state.stage = "EDIT_MENU";
+      await saveUserState(from, state);
+      await sendEditMenu(from, state.request.type);
+      return res.status(200).send("EVENT_RECEIVED");
+    }
+
+    if (state.stage === "EDIT_MENU") {
+      const prompts = {
+        edit_name: ["name", "Введіть нове ПІБ.", "EDIT_TEXT"],
+        edit_need: ["need", "Введіть новий опис запиту.", "EDIT_TEXT"],
+        edit_unit_number: ["militaryUnitNumber", "Введіть новий номер військової частини.", "EDIT_TEXT"],
+        edit_city: ["city", "Введіть нове місто.", "EDIT_TEXT"],
+        edit_np: ["novaPoshtaBranch", "Введіть нове відділення Нової пошти.", "EDIT_TEXT"],
+      };
+      if (buttonId === "edit_recipient") {
+        state.stage = "EDIT_RECIPIENT_CHOICE";
+        await saveUserState(from, state);
+        await sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "edit_recipient_other_yes", "edit_recipient_other_no");
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+      const selected = prompts[buttonId];
+      if (selected) {
+        state.editField = selected[0];
+        state.stage = selected[2];
+        await saveUserState(from, state);
+        await sendText(from, selected[1]);
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+      await sendEditMenu(from, state.request.type);
+      return res.status(200).send("EVENT_RECEIVED");
+    }
+
+    if (state.stage === "EDIT_TEXT" && text) {
+      state.request.data[state.editField] = text;
+      delete state.editField;
+      await showConfirmation(from, state);
+      return res.status(200).send("EVENT_RECEIVED");
+    }
+
+    if (state.stage === "EDIT_RECIPIENT_CHOICE") {
+      if (buttonId === "edit_recipient_other_yes") {
+        state.request.data.recipientAnotherPerson = true;
+        state.stage = "EDIT_RECIPIENT_NAME";
+        await saveUserState(from, state);
+        await sendText(from, "Введіть нове ПІБ іншого отримувача.");
+      } else if (buttonId === "edit_recipient_other_no") {
+        state.request.data.recipientAnotherPerson = false;
+        delete state.request.data.recipientName;
+        delete state.request.data.recipientPhone;
+        await showConfirmation(from, state);
+      } else {
+        await sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "edit_recipient_other_yes", "edit_recipient_other_no");
+      }
+      return res.status(200).send("EVENT_RECEIVED");
+    }
+
+    if (state.stage === "EDIT_RECIPIENT_NAME" && text) {
+      state.request.data.recipientName = text;
+      state.stage = "EDIT_RECIPIENT_PHONE";
+      await saveUserState(from, state);
+      await sendText(from, "Введіть новий номер телефону іншого отримувача.");
+      return res.status(200).send("EVENT_RECEIVED");
+    }
+
+    if (state.stage === "EDIT_RECIPIENT_PHONE" && text) {
+      state.request.data.recipientPhone = text;
+      await showConfirmation(from, state);
+      return res.status(200).send("EVENT_RECEIVED");
+    }
+
     if (state.stage === "CONFIRMATION") {
       if (buttonId === "confirm_request") {
-        if (state.request.type === "individual") {
-          await saveApplicantProfile(from, state.request);
-        }
+        if (state.request.type === "individual") await saveApplicantProfile(from, state.request);
         await sendText(from, "Заявку підтверджено. Номер заявки буде присвоєно після реєстрації.");
         await resetUserState(from);
       } else if (buttonId === "edit_request") {
-        await sendText(from, "Для тестового режиму використайте /reset, щоб заповнити заявку заново.");
+        state.stage = "EDIT_MENU";
+        await saveUserState(from, state);
+        await sendEditMenu(from, state.request.type);
       }
       return res.status(200).send("EVENT_RECEIVED");
     }
