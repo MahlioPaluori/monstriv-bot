@@ -67,19 +67,6 @@ async function findMonthlySpreadsheet(name) {
   return response.data.files?.[0] || null;
 }
 
-async function ensureSheetTab(sheets, spreadsheetId, title) {
-  const metadata = await sheets.spreadsheets.get({ spreadsheetId, fields: "sheets(properties(sheetId,title))" });
-  const existing = metadata.data.sheets?.find((sheet) => sheet.properties?.title === title);
-  if (existing) return existing.properties.sheetId;
-
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId,
-    requestBody: { requests: [{ addSheet: { properties: { title } } }] },
-  });
-
-  return null;
-}
-
 async function ensureHeaders(sheets, spreadsheetId, sheetName) {
   const range = `${sheetName}!A1:L1`;
   const current = await sheets.spreadsheets.values.get({ spreadsheetId, range });
@@ -113,9 +100,13 @@ async function getOrCreateMonthlySpreadsheet(date = new Date()) {
   const spreadsheetId = created.data.spreadsheetId;
   const { rootFolderId } = getConfig();
   const drive = getDrive();
+  const file = await drive.files.get({ fileId: spreadsheetId, fields: "id,parents", supportsAllDrives: true });
+  const oldParents = (file.data.parents || []).join(",");
+
   await drive.files.update({
     fileId: spreadsheetId,
     addParents: rootFolderId,
+    removeParents: oldParents || undefined,
     fields: "id,parents",
     supportsAllDrives: true,
   });
