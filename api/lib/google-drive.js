@@ -31,6 +31,10 @@ function safeFolderName(value) {
   return String(value || "").trim().replace(/[\\/:*?"<>|]/g, "_").slice(0, 200) || "Без назви";
 }
 
+function safeFileName(value) {
+  return String(value || "file").trim().replace(/[\\/:*?"<>|]/g, "_").slice(0, 200) || "file";
+}
+
 export async function getDriveRootFolder() {
   const { rootFolderId } = getConfig();
   const drive = getDrive();
@@ -86,7 +90,7 @@ export async function uploadBufferToDrive({ buffer, name, mimeType, parentId }) 
   const drive = getDrive();
   const response = await drive.files.create({
     requestBody: {
-      name: safeFolderName(name).replace(/\.(?=[^.]+$)/, ""),
+      name: safeFileName(name),
       parents: [parentId],
     },
     media: {
