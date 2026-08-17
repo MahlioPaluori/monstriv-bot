@@ -1,23 +1,126 @@
 import { google } from "googleapis";
 
+const SPREADSHEET_MIME = "application/vnd.google-apps.spreadsheet";
+const SHEET_HEADERS = [
+  "№ заявки",
+  "Дата",
+  "Тип заявника",
+  "ПІБ / відповідальна особа",
+  "Телефон",
+  "Номер ВЧ",
+  "Місто доставки",
+  "Відділення Нової пошти",
+  "Отримувач",
+  "Телефон отримувача",
+  "Потреба",
+  "Документи",
+];
+
 function getConfig() {
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
   const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
-  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+  const rootFolderId = process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
 
-  if (!clientId || !clientSecret || !refreshToken || !spreadsheetId) {
+  if (!clientId || !clientSecret || !refreshToken || !rootFolderId) {
     throw new Error("Google Sheets environment variables are missing");
   }
 
-  return { clientId, clientSecret, refreshToken, spreadsheetId };
+  return { clientId, clientSecret, refreshToken, rootFolderId };
 }
 
-function getSheets() {
+function getAuth() {
   const { clientId, clientSecret, refreshToken } = getConfig();
   const auth = new google.auth.OAuth2(clientId, clientSecret);
   auth.setCredentials({ refresh_token: refreshToken });
-  return google.sheets({ version: "v4", auth });
+  return auth;
+}
+
+function getSheets() {
+  return google.sheets({ version: "v4", auth: getAuth() });
+}
+
+function getDrive() {
+  return google.drive({ version: "v3", auth: getAuth() });
+}
+
+function escapeQueryValue(value) {
+  return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+function getMonthlySpreadsheetName(date = new Date()) {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  return `Запити-${month}-${date.getFullYear()}`;
+}
+
+async function findMonthlySpreadsheet(name) {
+  const { rootFolderId } = getConfig();
+  const drive = getDrive();
+  const escapedName = escapeQueryValue(name);
+  const response = await drive.files.list({
+    q: `'${rootFolderId}' in parents and name = '${escapedName}' and mimeType = '${SPREADSHEET_MIME}' and trashed = false`,
+    fields: "files(id,name,mimeType)",
+    pageSize: 10,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+  });
+  return response.data.files?.[0] || null;
+}
+
+async function ensureSheetTab(sheets, spreadsheetId, title) {
+  const metadata = await sheets.spreadsheets.get({ spreadsheetId, fields: "sheets(properties(sheetId,title))" });
+  const existing = metadata.data.sheets?.find((sheet) => sheet.properties?.title === title);
+  if (existing) return existing.properties.sheetId;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: { requests: [{ addSheet: { properties: { title } } }] },
+  });
+
+  return null;
+}
+
+async function ensureHeaders(sheets, spreadsheetId, sheetName) {
+  const range = `${sheetName}!A1:L1`;
+  const current = await sheets.spreadsheets.values.get({ spreadsheetId, range });
+  if (current.data.values?.[0]?.length) return;
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range,
+    valueInputOption: "RAW",
+    requestBody: { values: [SHEET_HEADERS] },
+  });
+}
+
+async function getOrCreateMonthlySpreadsheet(date = new Date()) {
+  const name = getMonthlySpreadsheetName(date);
+  const existing = await findMonthlySpreadsheet(name);
+  if (existing) return existing.id;
+
+  const sheets = getSheets();
+  const created = await sheets.spreadsheets.create({
+    requestBody: {
+      properties: { title: name },
+      sheets: [
+        { properties: { title: process.env.GOOGLE_SHEETS_INDIVIDUAL_SHEET_NAME || "Фізособи" } },
+        { properties: { title: process.env.GOOGLE_SHEETS_MILITARY_SHEET_NAME || "Військові частини" } },
+      ],
+    },
+    fields: "spreadsheetId",
+  });
+
+  const spreadsheetId = created.data.spreadsheetId;
+  const { rootFolderId } = getConfig();
+  const drive = getDrive();
+  await drive.files.update({
+    fileId: spreadsheetId,
+    addParents: rootFolderId,
+    fields: "id,parents",
+    supportsAllDrives: true,
+  });
+
+  return spreadsheetId;
 }
 
 function documentsToLinks(documents = {}) {
@@ -29,11 +132,13 @@ function documentsToLinks(documents = {}) {
 
 export async function appendApplicationToSheet(request) {
   const sheets = getSheets();
-  const { spreadsheetId } = getConfig();
+  const spreadsheetId = await getOrCreateMonthlySpreadsheet();
   const sheetName = request.type === "military_unit"
     ? (process.env.GOOGLE_SHEETS_MILITARY_SHEET_NAME || "Військові частини")
     : (process.env.GOOGLE_SHEETS_INDIVIDUAL_SHEET_NAME || "Фізособи");
   const data = request.data || {};
+
+  await ensureHeaders(sheets, spreadsheetId, sheetName);
 
   const row = [
     request.applicationNumber || "",
@@ -57,4 +162,6 @@ export async function appendApplicationToSheet(request) {
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: [row] },
   });
+
+  return spreadsheetId;
 }
