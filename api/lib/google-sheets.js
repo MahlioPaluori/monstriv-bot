@@ -88,6 +88,10 @@ function sheetRange(title, range) {
   return `'${title}'!${range}`;
 }
 
+function rowsMatchHeaders(actual, expected) {
+  return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
+}
+
 async function addHeadersIfSheetIsEmpty(sheetsApi, spreadsheetId, title, layout) {
   const valuesResponse = await sheetsApi.spreadsheets.values.get({
     spreadsheetId,
@@ -165,6 +169,13 @@ export async function testCurrentMonthSpreadsheetAccess() {
   });
   const sheetTitles = response.data.sheets?.map((sheet) => sheet.properties?.title).filter(Boolean) || [];
   const missingSheetTitles = REQUIRED_SHEET_TITLES.filter((title) => !sheetTitles.includes(title));
+  const headerRanges = await sheetsApi.spreadsheets.values.batchGet({
+    spreadsheetId: spreadsheet.spreadsheetId,
+    ranges: [sheetRange("Фізособи", "A1:O1"), sheetRange("Військові частини", "A1:M1")],
+  });
+  const [physicalHeaderRange, militaryHeaderRange] = headerRanges.data.valueRanges || [];
+  const physicalHeaders = physicalHeaderRange?.values?.[0] || [];
+  const militaryHeaders = militaryHeaderRange?.values?.[0] || [];
 
   return {
     success: missingSheetTitles.length === 0,
@@ -174,5 +185,11 @@ export async function testCurrentMonthSpreadsheetAccess() {
     timeZone: response.data.properties?.timeZone || null,
     sheets: sheetTitles,
     missingSheetTitles,
+    physicalHeaders,
+    militaryHeaders,
+    physicalHeadersHaveData: physicalHeaders.some((value) => value !== ""),
+    militaryHeadersHaveData: militaryHeaders.some((value) => value !== ""),
+    physicalHeadersMatch: rowsMatchHeaders(physicalHeaders, OPERATOR_SHEET_LAYOUTS["Фізособи"].headers),
+    militaryHeadersMatch: rowsMatchHeaders(militaryHeaders, OPERATOR_SHEET_LAYOUTS["Військові частини"].headers),
   };
 }
