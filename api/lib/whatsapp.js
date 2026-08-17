@@ -77,26 +77,39 @@ export function sendReturningApplicantMenu(to, lastDocumentsUpdatedAt) {
 }
 
 export function sendEditMenu(to, type) {
-  const buttons = type === "military_unit"
-    ? [
-        { type: "reply", reply: { id: "edit_name", title: "ПІБ" } },
-        { type: "reply", reply: { id: "edit_unit_number", title: "Номер ВЧ" } },
-        { type: "reply", reply: { id: "edit_need", title: "Потребу" } },
-      ]
-    : [
-        { type: "reply", reply: { id: "edit_name", title: "ПІБ" } },
-        { type: "reply", reply: { id: "edit_need", title: "Потребу" } },
-        { type: "reply", reply: { id: "edit_city", title: "Місто" } },
-        { type: "reply", reply: { id: "edit_np", title: "Нову пошту" } },
-        { type: "reply", reply: { id: "edit_recipient", title: "Отримувача" } },
-      ];
+  if (type !== "military_unit") {
+    return sendMessage(to, {
+      type: "interactive",
+      interactive: {
+        type: "list",
+        body: { text: "Оберіть, що саме бажаєте змінити:" },
+        action: {
+          button: "Обрати поле",
+          sections: [{
+            title: "Дані заявки",
+            rows: [
+              { id: "edit_name", title: "ПІБ" },
+              { id: "edit_need", title: "Потребу" },
+              { id: "edit_city", title: "Місто" },
+              { id: "edit_np", title: "Нову пошту" },
+              { id: "edit_recipient", title: "Отримувача" },
+            ],
+          }],
+        },
+      },
+    });
+  }
 
   return sendMessage(to, {
     type: "interactive",
     interactive: {
       type: "button",
       body: { text: "Що саме бажаєте змінити?" },
-      action: { buttons },
+      action: { buttons: [
+        { type: "reply", reply: { id: "edit_name", title: "ПІБ" } },
+        { type: "reply", reply: { id: "edit_unit_number", title: "Номер ВЧ" } },
+        { type: "reply", reply: { id: "edit_need", title: "Потребу" } },
+      ] },
     },
   });
 }
