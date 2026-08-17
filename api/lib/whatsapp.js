@@ -101,6 +101,23 @@ export function sendEditMenu(to, type) {
   });
 }
 
+export function sendOptionalDocumentPrompt(to, documentLabel) {
+  return sendMessage(to, {
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: {
+        text: `Будь ласка, надішліть ${documentLabel}.\n\nЦей документ не є обов'язковим. Якщо у вас його немає або ви не хочете додавати його до заявки, натисніть «Пропустити».\n\nЯкщо додаєте документ, можна надіслати один або кілька файлів/фото. Після завантаження натисніть «Готово».`,
+      },
+      action: {
+        buttons: [
+          { type: "reply", reply: { id: "document_skip", title: "⏭ Пропустити" } },
+        ],
+      },
+    },
+  });
+}
+
 export async function sendDocumentDone(to, documentLabel, allowSkip = false) {
   const claimed = await claimDocumentAcknowledgement(to, documentLabel);
   if (!claimed) return null;
