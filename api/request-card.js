@@ -66,23 +66,33 @@ function requestCardPage(request) {
   <style>
     @page { size: A4 portrait; margin: 14mm; }
     * { box-sizing: border-box; }
-    body { margin: 0; color: #000; background: #f2f2f2; font-family: Arial, sans-serif; font-size: 12pt; line-height: 1.4; }
-    .screen-actions { max-width: 184mm; margin: 12px auto 0; text-align: right; }
-    .screen-actions button { padding: 8px 14px; font: inherit; cursor: pointer; }
-    .card { width: 184mm; min-height: 267mm; margin: 12px auto; padding: 0; background: #fff; }
-    .header, .section { border-bottom: 1px solid #000; padding: 0 0 12px; margin-bottom: 14px; }
-    .header h1 { margin: 0 0 6px; font-size: 18pt; }
-    .header .name { margin: 0; font-size: 14pt; font-weight: bold; }
-    .header .date { margin: 8px 0 0; font-size: 10pt; }
-    h2 { margin: 0 0 8px; font-size: 12pt; }
-    .need { margin: 0; min-height: 54mm; white-space: pre-wrap; overflow-wrap: anywhere; }
-    .notes { border-bottom: 1px solid #000; padding-bottom: 8px; margin-bottom: 14px; }
-    .note-line { height: 10mm; border-bottom: 1px solid #000; }
-    .shipping p { margin: 4px 0; }
+    body { margin: 0; color: #1f1f1f; background: #ededed; font-family: Arial, Helvetica, sans-serif; font-size: 11.5pt; line-height: 1.45; }
+    .screen-actions { width: 184mm; margin: 14px auto 0; text-align: right; }
+    .screen-actions button { padding: 7px 13px; border: 1px solid #555; border-radius: 3px; background: #fff; color: #1f1f1f; font: inherit; font-size: 10.5pt; cursor: pointer; }
+    .card { width: 184mm; min-height: 267mm; margin: 10px auto 20px; padding: 12mm; background: #fff; box-shadow: 0 2px 12px rgba(0, 0, 0, .16); }
+    .header { border-bottom: 2px solid #333; padding-bottom: 9px; margin-bottom: 15px; }
+    .header-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    .header h1 { margin: 0; font-size: 18pt; line-height: 1.15; letter-spacing: .01em; }
+    .header .date { margin: 0; color: #555; font-size: 10pt; white-space: nowrap; }
+    .header .name { margin: 8px 0 0; font-size: 14pt; font-weight: 700; line-height: 1.25; }
+    .header .unit { margin: 5px 0 0; color: #333; font-size: 11pt; }
+    .section { margin-bottom: 14px; }
+    h2 { margin: 0 0 7px; color: #303030; font-size: 11.5pt; letter-spacing: .04em; }
+    .need-box { border: 1px solid #a8a8a8; padding: 10px 12px; min-height: 48mm; }
+    .need { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .notes { margin-bottom: 14px; }
+    .notes-box { border: 1px solid #a8a8a8; padding: 0 12px; }
+    .note-line { height: 11mm; border-bottom: 1px solid #b6b6b6; }
+    .note-line:last-child { border-bottom: 0; }
+    .shipping { border-top: 1px solid #777; padding-top: 11px; }
+    .shipping-grid { display: grid; grid-template-columns: 43mm 1fr; border: 1px solid #a8a8a8; }
+    .shipping-label, .shipping-value { min-height: 10mm; padding: 6px 9px; border-bottom: 1px solid #c3c3c3; }
+    .shipping-label { border-right: 1px solid #c3c3c3; color: #404040; font-weight: 700; }
+    .shipping-grid > :nth-last-child(-n + 2) { border-bottom: 0; }
     @media print {
       body { background: #fff; }
       .screen-actions { display: none; }
-      .card { width: auto; min-height: 0; margin: 0; page-break-after: always; }
+      .card { width: auto; min-height: 0; margin: 0; padding: 0; box-shadow: none; page-break-after: always; }
     }
   </style>
 </head>
@@ -90,25 +100,29 @@ function requestCardPage(request) {
   <div class="screen-actions"><button type="button" onclick="window.print()">Друкувати</button></div>
   <main class="card">
     <header class="header">
-      <h1>ЗАЯВКА № ${escapeHtml(request.applicationId)}</h1>
+      <div class="header-top">
+        <h1>ЗАЯВКА № ${escapeHtml(request.applicationId)}</h1>
+        <p class="date">Дата: ${displayValue(request.date)}</p>
+      </div>
       <p class="name">${displayValue(request.personName)}</p>
-      <p class="date">Дата: ${displayValue(request.date)}</p>
       ${militaryUnit}
     </header>
-    <section class="section">
+    <section class="section need-section">
       <h2>ПОТРЕБА</h2>
-      <p class="need">${displayValue(request.need)}</p>
+      <div class="need-box"><p class="need">${displayValue(request.need)}</p></div>
     </section>
     <section class="notes">
       <h2>КОМПЛЕКТАЦІЯ / ПРИМІТКИ</h2>
-      <div class="note-line"></div><div class="note-line"></div><div class="note-line"></div><div class="note-line"></div>
+      <div class="notes-box"><div class="note-line"></div><div class="note-line"></div><div class="note-line"></div><div class="note-line"></div><div class="note-line"></div></div>
     </section>
     <section class="shipping">
       <h2>ДАНІ ДЛЯ ВІДПРАВКИ</h2>
-      <p><strong>Отримувач:</strong> ${displayValue(request.actualRecipientName)}</p>
-      <p><strong>Телефон:</strong> ${displayValue(request.actualRecipientPhone)}</p>
-      <p><strong>Місто:</strong> ${displayValue(request.city)}</p>
-      <p><strong>Нова пошта:</strong> ${displayValue(request.novaPoshtaBranch)}</p>
+      <div class="shipping-grid">
+        <div class="shipping-label">Отримувач:</div><div class="shipping-value">${displayValue(request.actualRecipientName)}</div>
+        <div class="shipping-label">Телефон:</div><div class="shipping-value">${displayValue(request.actualRecipientPhone)}</div>
+        <div class="shipping-label">Місто:</div><div class="shipping-value">${displayValue(request.city)}</div>
+        <div class="shipping-label">Нова пошта:</div><div class="shipping-value">${displayValue(request.novaPoshtaBranch)}</div>
+      </div>
     </section>
   </main>
 </body>
