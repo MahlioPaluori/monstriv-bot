@@ -4,7 +4,14 @@ import { getDrive, getGoogleAuth, getGoogleConfig } from "./google-drive.js";
 const SPREADSHEET_MIME = "application/vnd.google-apps.spreadsheet";
 const REQUIRED_SHEET_TITLES = ["Фізособи", "Військові частини"];
 const UKRAINE_TIME_ZONE = "Europe/Kyiv";
-export const DEFAULT_REQUEST_STATUS = "Новий";
+export const DEFAULT_REQUEST_STATUS = "Нова";
+const REQUEST_STATUS_OPTIONS = ["Нова", "В роботі", "Зібрано", "Відхилено"];
+const REQUEST_STATUS_FORMATS = [
+  { status: "Нова", backgroundColor: { red: 0.82, green: 0.91, blue: 0.98 } },
+  { status: "В роботі", backgroundColor: { red: 1, green: 0.95, blue: 0.7 } },
+  { status: "Зібрано", backgroundColor: { red: 0.8, green: 0.94, blue: 0.82 } },
+  { status: "Відхилено", backgroundColor: { red: 1, green: 0.8, blue: 0.8 } },
+];
 
 const OPERATOR_SHEET_LAYOUTS = {
   "Фізособи": {
@@ -282,11 +289,68 @@ async function addHeadersIfSheetIsEmpty(sheetsApi, spreadsheetId, title, layout)
   return true;
 }
 
+function statusColumnRange(sheetId) {
+  return { sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 1 };
+}
+
+function isStatusColumnRange(range, sheetId) {
+  return range?.sheetId === sheetId
+    && range.startRowIndex === 1
+    && range.startColumnIndex === 0
+    && range.endColumnIndex === 1
+    && range.endRowIndex === undefined;
+}
+
+function hasStatusConditionalFormat(sheet, status) {
+  const sheetId = sheet.properties?.sheetId;
+  return (sheet.conditionalFormats || []).some((rule) => {
+    const condition = rule.booleanRule?.condition;
+    return rule.ranges?.some((range) => isStatusColumnRange(range, sheetId))
+      && condition?.type === "TEXT_EQ"
+      && condition.values?.some((value) => value.userEnteredValue === status);
+  });
+}
+
+function statusValidationRequest(sheetId) {
+  return {
+    setDataValidation: {
+      range: statusColumnRange(sheetId),
+      rule: {
+        condition: {
+          type: "ONE_OF_LIST",
+          values: REQUEST_STATUS_OPTIONS.map((status) => ({ userEnteredValue: status })),
+        },
+        strict: true,
+        showCustomUi: true,
+      },
+    },
+  };
+}
+
+function missingStatusConditionalFormatRequests(sheet) {
+  const sheetId = sheet.properties?.sheetId;
+  let index = (sheet.conditionalFormats || []).length;
+  return REQUEST_STATUS_FORMATS
+    .filter(({ status }) => !hasStatusConditionalFormat(sheet, status))
+    .map(({ status, backgroundColor }) => ({
+      addConditionalFormatRule: {
+        rule: {
+          ranges: [statusColumnRange(sheetId)],
+          booleanRule: {
+            condition: { type: "TEXT_EQ", values: [{ userEnteredValue: status }] },
+            format: { backgroundColor },
+          },
+        },
+        index: index++,
+      },
+    }));
+}
+
 async function ensureOperatorSheetStructure(spreadsheetId) {
   const sheetsApi = getSheets();
   const metadata = await sheetsApi.spreadsheets.get({
     spreadsheetId,
-    fields: "sheets(properties(sheetId,title,sheetType))",
+    fields: "sheets(properties(sheetId,title,sheetType),conditionalFormats)",
   });
   const sheetsByTitle = new Map((metadata.data.sheets || []).map((sheet) => [sheet.properties?.title, sheet]));
 
@@ -295,15 +359,23 @@ async function ensureOperatorSheetStructure(spreadsheetId) {
     await addHeadersIfSheetIsEmpty(sheetsApi, spreadsheetId, title, layout);
   }
 
-  const requests = REQUIRED_SHEET_TITLES.map((title) => ({
-    updateSheetProperties: {
-      properties: {
-        sheetId: sheetsByTitle.get(title).properties.sheetId,
-        gridProperties: { frozenRowCount: 1, frozenColumnCount: 1 },
+  const requests = REQUIRED_SHEET_TITLES.flatMap((title) => {
+    const sheet = sheetsByTitle.get(title);
+    const sheetId = sheet.properties.sheetId;
+    return [
+      {
+        updateSheetProperties: {
+          properties: {
+            sheetId,
+            gridProperties: { frozenRowCount: 1, frozenColumnCount: 1 },
+          },
+          fields: "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
+        },
       },
-      fields: "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
-    },
-  }));
+      statusValidationRequest(sheetId),
+      ...missingStatusConditionalFormatRequests(sheet),
+    ];
+  });
   await sheetsApi.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } });
 }
 
