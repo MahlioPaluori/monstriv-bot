@@ -4,6 +4,18 @@ import { getDrive, getGoogleAuth, getGoogleConfig } from "./google-drive.js";
 const SPREADSHEET_MIME = "application/vnd.google-apps.spreadsheet";
 const REQUIRED_SHEET_TITLES = ["Фізособи", "Військові частини"];
 const UKRAINE_TIME_ZONE = "Europe/Kyiv";
+export const DEFAULT_REQUEST_STATUS = "Новий";
+
+const OPERATOR_SHEET_LAYOUTS = {
+  "Фізособи": {
+    lastColumn: "O",
+    headers: ["Статус", "ID запиту", "Дата", "Потреба", "ПІБ", "Телефон", "Паспорт", "РНОКПП", "Військовий документ", "УБД", "Місто", "Нова пошта", "Інший отримувач", "ПІБ отримувача", "Телефон отримувача"],
+  },
+  "Військові частини": {
+    lastColumn: "M",
+    headers: ["Статус", "ID запиту", "Дата", "Потреба", "ПІБ відповідальної особи", "Телефон", "Номер ВЧ", "Офіційний запит", "Місто", "Нова пошта", "Інший отримувач", "ПІБ отримувача", "Телефон отримувача"],
+  },
+};
 
 function getSheets() {
   return google.sheets({ version: "v4", auth: getGoogleAuth() });
@@ -72,11 +84,60 @@ async function moveSpreadsheetToRootFolder(spreadsheetId, rootFolderId) {
   });
 }
 
+function sheetRange(title, range) {
+  return `'${title}'!${range}`;
+}
+
+async function addHeadersIfSheetIsEmpty(sheetsApi, spreadsheetId, title, layout) {
+  const valuesResponse = await sheetsApi.spreadsheets.values.get({
+    spreadsheetId,
+    range: sheetRange(title, `A1:${layout.lastColumn}`),
+  });
+  const hasData = (valuesResponse.data.values || []).some((row) => row.some((value) => value !== ""));
+  if (hasData) return false;
+
+  await sheetsApi.spreadsheets.values.update({
+    spreadsheetId,
+    range: sheetRange(title, "A1"),
+    valueInputOption: "RAW",
+    requestBody: { values: [layout.headers] },
+  });
+  return true;
+}
+
+async function ensureOperatorSheetStructure(spreadsheetId) {
+  const sheetsApi = getSheets();
+  const metadata = await sheetsApi.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets(properties(sheetId,title,sheetType))",
+  });
+  const sheetsByTitle = new Map((metadata.data.sheets || []).map((sheet) => [sheet.properties?.title, sheet]));
+
+  for (const [title, layout] of Object.entries(OPERATOR_SHEET_LAYOUTS)) {
+    if (!sheetsByTitle.has(title)) throw new Error(`Required sheet is missing: ${title}`);
+    await addHeadersIfSheetIsEmpty(sheetsApi, spreadsheetId, title, layout);
+  }
+
+  const requests = REQUIRED_SHEET_TITLES.map((title) => ({
+    updateSheetProperties: {
+      properties: {
+        sheetId: sheetsByTitle.get(title).properties.sheetId,
+        gridProperties: { frozenRowCount: 1, frozenColumnCount: 1 },
+      },
+      fields: "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
+    },
+  }));
+  await sheetsApi.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } });
+}
+
 export async function getOrCreateCurrentMonthSpreadsheet() {
   const { rootFolderId } = getGoogleConfig();
   const name = getCurrentMonthSpreadsheetName();
   const existing = await findSpreadsheet(name, rootFolderId);
-  if (existing) return { spreadsheetId: existing.id, name: existing.name, created: false };
+  if (existing) {
+    await ensureOperatorSheetStructure(existing.id);
+    return { spreadsheetId: existing.id, name: existing.name, created: false };
+  }
 
   const sheetsApi = getSheets();
   const created = await sheetsApi.spreadsheets.create({
@@ -91,6 +152,7 @@ export async function getOrCreateCurrentMonthSpreadsheet() {
 
   await removeUnexpectedDefaultSheets(spreadsheetId, created.data.sheets);
   await moveSpreadsheetToRootFolder(spreadsheetId, rootFolderId);
+  await ensureOperatorSheetStructure(spreadsheetId);
   return { spreadsheetId, name: created.data.properties?.title || name, created: true };
 }
 
