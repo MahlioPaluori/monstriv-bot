@@ -28,6 +28,7 @@ function profileKey(phone) { return `wa:profile:${phone}`; }
 function requestCounterKey() { return `requests:counter:${new Date().getUTCFullYear()}`; }
 function documentAckKey(phone, documentKey) { return `wa:doc-ack:${phone}:${documentKey}`; }
 function mediaClaimKey(phone, mediaId) { return `wa:media:${phone}:${mediaId}`; }
+function documentSequenceKey(phone, documentKey) { return `wa:doc-seq:${phone}:${documentKey}`; }
 
 export async function getUserState(phone) {
   const redis = await getRedis();
@@ -45,12 +46,7 @@ export async function saveUserState(phone, state) {
 }
 
 export async function createUserState(phone) {
-  return saveUserState(phone, {
-    stage: "NEW",
-    operatorRequested: false,
-    request: null,
-    createdAt: new Date().toISOString(),
-  });
+  return saveUserState(phone, { stage: "NEW", operatorRequested: false, request: null, createdAt: new Date().toISOString() });
 }
 
 export async function resetUserState(phone) {
@@ -60,6 +56,8 @@ export async function resetUserState(phone) {
   if (keys.length) await redis.del(keys);
   const mediaKeys = await redis.keys(`wa:media:${phone}:*`);
   if (mediaKeys.length) await redis.del(mediaKeys);
+  const sequenceKeys = await redis.keys(`wa:doc-seq:${phone}:*`);
+  if (sequenceKeys.length) await redis.del(sequenceKeys);
 }
 
 export async function claimDocumentAcknowledgement(phone, documentKey) {
@@ -79,6 +77,11 @@ export async function releaseMediaUploadClaim(phone, mediaId) {
   await redis.del(mediaClaimKey(phone, mediaId));
 }
 
+export async function nextDocumentSequence(phone, documentKey) {
+  const redis = await getRedis();
+  return redis.incr(documentSequenceKey(phone, documentKey));
+}
+
 export async function getApplicantProfile(phone) {
   const redis = await getRedis();
   const raw = await redis.get(profileKey(phone));
@@ -92,9 +95,7 @@ export async function saveApplicantProfile(phone, request) {
   const previous = await getApplicantProfile(phone);
   const now = new Date().toISOString();
   const documentsWereUpdated = !request.usingSavedData;
-  const lastDocumentsUpdatedAt = documentsWereUpdated
-    ? now
-    : (previous?.lastDocumentsUpdatedAt || request.savedDocumentsUpdatedAt || now);
+  const lastDocumentsUpdatedAt = documentsWereUpdated ? now : (previous?.lastDocumentsUpdatedAt || request.savedDocumentsUpdatedAt || now);
   const profile = {
     phone,
     type: request.type,
