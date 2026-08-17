@@ -3,7 +3,7 @@ import { Readable } from "node:stream";
 
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 
-function getConfig() {
+export function getGoogleConfig() {
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
   const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
@@ -16,10 +16,15 @@ function getConfig() {
   return { clientId, clientSecret, refreshToken, rootFolderId };
 }
 
-function getDrive() {
-  const { clientId, clientSecret, refreshToken } = getConfig();
+export function getGoogleAuth() {
+  const { clientId, clientSecret, refreshToken } = getGoogleConfig();
   const auth = new google.auth.OAuth2(clientId, clientSecret);
   auth.setCredentials({ refresh_token: refreshToken });
+  return auth;
+}
+
+export function getDrive() {
+  const auth = getGoogleAuth();
   return google.drive({ version: "v3", auth });
 }
 
@@ -36,7 +41,7 @@ function safeFileName(value) {
 }
 
 export async function getDriveRootFolder() {
-  const { rootFolderId } = getConfig();
+  const { rootFolderId } = getGoogleConfig();
   const drive = getDrive();
   const response = await drive.files.get({
     fileId: rootFolderId,
@@ -77,7 +82,7 @@ export async function getOrCreateFolder(name, parentId) {
 }
 
 export async function getOrCreateRootSubfolder(name) {
-  const { rootFolderId } = getConfig();
+  const { rootFolderId } = getGoogleConfig();
   return getOrCreateFolder(name, rootFolderId);
 }
 
