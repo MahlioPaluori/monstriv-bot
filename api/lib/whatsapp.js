@@ -1,4 +1,4 @@
-import { createApplicationNumber, claimDocumentAcknowledgement } from "./state.js";
+import { claimDocumentAcknowledgement } from "./state.js";
 
 const GRAPH_VERSION = "v26.0";
 
@@ -26,21 +26,21 @@ async function sendMessage(to, payload) {
 }
 
 export async function sendText(to, body) {
-  if (body === "Заявку підтверджено. Номер заявки буде присвоєно після реєстрації.") {
-    const requestNumber = await createApplicationNumber();
-    return sendMessage(to, {
-      type: "interactive",
-      interactive: {
-        type: "button",
-        body: { text: `Заявку прийнято ✅\n\nНомер вашої заявки: ${requestNumber}\n\nДалі із заявкою працюватиме оператор.` },
-        action: { buttons: [
-          { type: "reply", reply: { id: "send_request", title: "📤 Нова заявка" } },
-          { type: "reply", reply: { id: "operator", title: "💬 Написати оператору" } },
-        ] },
-      },
-    });
-  }
   return sendMessage(to, { type: "text", text: { body } });
+}
+
+export function sendApplicationAccepted(to, applicationId) {
+  return sendMessage(to, {
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text: `Заявку прийнято ✅\n\nНомер вашої заявки: ${applicationId}\n\nДалі із заявкою працюватиме оператор.` },
+      action: { buttons: [
+        { type: "reply", reply: { id: "send_request", title: "📤 Нова заявка" } },
+        { type: "reply", reply: { id: "operator", title: "💬 Написати оператору" } },
+      ] },
+    },
+  });
 }
 
 export function sendMainMenu(to) {

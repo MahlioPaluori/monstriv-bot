@@ -92,6 +92,109 @@ function rowsMatchHeaders(actual, expected) {
   return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
 }
 
+function valueOrEmpty(value) {
+  return value ?? "";
+}
+
+function formatConfirmedAt(confirmedAt) {
+  const date = new Date(confirmedAt);
+  if (!Number.isFinite(date.getTime())) throw new Error("Invalid confirmation timestamp");
+  const parts = new Intl.DateTimeFormat("uk-UA", {
+    timeZone: UKRAINE_TIME_ZONE,
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.day}.${values.month}.${values.year} ${values.hour}:${values.minute}`;
+}
+
+export function serializeDocuments(files) {
+  if (!Array.isArray(files) || !files.length) return "";
+  return files.map((file, index) => `${index + 1}. ${file.fileName || "Файл"}\n${file.driveUrl || ""}`.trim()).join("\n\n");
+}
+
+function recipientValues(data) {
+  const anotherRecipient = data.recipientAnotherPerson === true;
+  return [
+    anotherRecipient ? "Так" : "Ні",
+    anotherRecipient ? valueOrEmpty(data.recipientName) : "",
+    anotherRecipient ? valueOrEmpty(data.recipientPhone) : "",
+  ];
+}
+
+function buildPhysicalPersonRow(request, applicationId, confirmedAt) {
+  const data = request.data || {};
+  const documents = request.documents || {};
+  return [
+    DEFAULT_REQUEST_STATUS,
+    applicationId,
+    formatConfirmedAt(confirmedAt),
+    valueOrEmpty(data.need),
+    valueOrEmpty(data.name),
+    valueOrEmpty(data.phone),
+    serializeDocuments(documents.passport),
+    serializeDocuments(documents.rnokpp),
+    serializeDocuments(documents.military_id),
+    serializeDocuments(documents.ubd),
+    valueOrEmpty(data.city),
+    valueOrEmpty(data.novaPoshtaBranch),
+    ...recipientValues(data),
+  ];
+}
+
+function buildMilitaryUnitRow(request, applicationId, confirmedAt) {
+  const data = request.data || {};
+  const documents = request.documents || {};
+  return [
+    DEFAULT_REQUEST_STATUS,
+    applicationId,
+    formatConfirmedAt(confirmedAt),
+    valueOrEmpty(data.need),
+    valueOrEmpty(data.name),
+    valueOrEmpty(data.phone),
+    valueOrEmpty(data.militaryUnitNumber),
+    serializeDocuments(documents.official_request),
+    valueOrEmpty(data.city),
+    valueOrEmpty(data.novaPoshtaBranch),
+    ...recipientValues(data),
+  ];
+}
+
+async function spreadsheetAlreadyHasApplicationId(sheetsApi, spreadsheetId, sheetTitle, applicationId) {
+  const response = await sheetsApi.spreadsheets.values.get({
+    spreadsheetId,
+    range: sheetRange(sheetTitle, "B2:B"),
+  });
+  return (response.data.values || []).some((row) => row[0] === applicationId);
+}
+
+export async function appendConfirmedRequest(request, applicationId, confirmedAt) {
+  const spreadsheet = await getOrCreateCurrentMonthSpreadsheet();
+  const sheetsApi = getSheets();
+  const isMilitaryUnit = request.type === "military_unit";
+  const sheetTitle = isMilitaryUnit ? "Військові частини" : "Фізособи";
+  const row = isMilitaryUnit
+    ? buildMilitaryUnitRow(request, applicationId, confirmedAt)
+    : buildPhysicalPersonRow(request, applicationId, confirmedAt);
+
+  if (await spreadsheetAlreadyHasApplicationId(sheetsApi, spreadsheet.spreadsheetId, sheetTitle, applicationId)) {
+    return { spreadsheetId: spreadsheet.spreadsheetId, sheetTitle, existing: true };
+  }
+
+  const response = await sheetsApi.spreadsheets.values.append({
+    spreadsheetId: spreadsheet.spreadsheetId,
+    range: sheetRange(sheetTitle, isMilitaryUnit ? "A:M" : "A:O"),
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [row] },
+  });
+  return { spreadsheetId: spreadsheet.spreadsheetId, sheetTitle, existing: false, updatedRange: response.data.updates?.updatedRange || null };
+}
+
 async function addHeadersIfSheetIsEmpty(sheetsApi, spreadsheetId, title, layout) {
   const valuesResponse = await sheetsApi.spreadsheets.values.get({
     spreadsheetId,

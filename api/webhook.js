@@ -1,5 +1,6 @@
 import {
   claimMediaUpload,
+  createApplicationNumber,
   createUserState,
   getApplicantProfile,
   getUserState,
@@ -11,7 +12,9 @@ import {
 } from "./lib/state.js";
 import { downloadWhatsAppMedia } from "./lib/meta-media.js";
 import { getOrCreateApplicantFolder, uploadBufferToDrive } from "./lib/google-drive.js";
+import { appendConfirmedRequest } from "./lib/google-sheets.js";
 import {
+  sendApplicationAccepted,
   sendApplicantTypeMenu,
   sendDocumentDone,
   sendEditMenu,
@@ -118,6 +121,33 @@ async function recipientChoice(from, state, another) {
   }
   await showConfirmation(from, state);
 }
+async function confirmRequest(from, state) {
+  const request = state.request;
+  let persistedConfirmationData = false;
+  if (!request.applicationId) {
+    request.applicationId = await createApplicationNumber();
+    persistedConfirmationData = true;
+  }
+  if (!request.confirmedAt) {
+    request.confirmedAt = new Date().toISOString();
+    persistedConfirmationData = true;
+  }
+  if (request.sheetsRecorded !== true && request.sheetsRecorded !== false) {
+    request.sheetsRecorded = false;
+    persistedConfirmationData = true;
+  }
+  if (persistedConfirmationData) await saveUserState(from, state);
+
+  if (!request.sheetsRecorded) {
+    await appendConfirmedRequest(request, request.applicationId, request.confirmedAt);
+    request.sheetsRecorded = true;
+    await saveUserState(from, state);
+  }
+
+  if (request.type === "individual") await saveApplicantProfile(from, request);
+  await sendApplicationAccepted(from, request.applicationId);
+  await resetUserState(from);
+}
 
 export default async function handler(req, res) {
   if (req.method === "GET") {
@@ -189,7 +219,7 @@ export default async function handler(req, res) {
     if (state.stage === "EDIT_RECIPIENT_CHOICE") { if (buttonId === "edit_recipient_other_yes") { state.request.data.recipientAnotherPerson = true; state.stage = "EDIT_RECIPIENT_NAME"; await saveUserState(from, state); await sendText(from, "Введіть нове ПІБ іншого отримувача."); } else if (buttonId === "edit_recipient_other_no") { state.request.data.recipientAnotherPerson = false; delete state.request.data.recipientName; delete state.request.data.recipientPhone; await showConfirmation(from, state); } else await sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "edit_recipient_other_yes", "edit_recipient_other_no"); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_RECIPIENT_NAME" && text) { state.request.data.recipientName = text; state.stage = "EDIT_RECIPIENT_PHONE"; await saveUserState(from, state); await sendText(from, "Введіть новий номер телефону іншого отримувача."); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_RECIPIENT_PHONE" && text) { state.request.data.recipientPhone = text; await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); }
-    if (state.stage === "CONFIRMATION") { if (buttonId === "confirm_request") { if (state.request.type === "individual") await saveApplicantProfile(from, state.request); await sendText(from, "Заявку підтверджено. Номер заявки буде присвоєно після реєстрації."); await resetUserState(from); } else if (buttonId === "edit_request") { state.stage = "EDIT_MENU"; await saveUserState(from, state); await sendEditMenu(from, state.request.type); } return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "CONFIRMATION") { if (buttonId === "confirm_request") { try { await confirmRequest(from, state); } catch (error) { console.error("Request confirmation error:", error); try { await sendText(from, "Не вдалося зареєструвати заявку через тимчасову технічну помилку. Будь ласка, натисніть «Підтвердити заявку» ще раз."); } catch (messageError) { console.error("Confirmation error message failed:", messageError); } } } else if (buttonId === "edit_request") { state.stage = "EDIT_MENU"; await saveUserState(from, state); await sendEditMenu(from, state.request.type); } return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "OPERATOR") return res.status(200).send("EVENT_RECEIVED");
     if (state.stage === "CONFIRMED") { await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
     await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
