@@ -1,11 +1,16 @@
 import {
+  claimMediaUpload,
   createUserState,
   getApplicantProfile,
   getUserState,
+  nextDocumentSequence,
+  releaseMediaUploadClaim,
   resetUserState,
   saveApplicantProfile,
   saveUserState,
 } from "./lib/state.js";
+import { downloadWhatsAppMedia } from "./lib/meta-media.js";
+import { getOrCreateApplicantFolder, uploadBufferToDrive } from "./lib/google-drive.js";
 import {
   sendApplicantTypeMenu,
   sendDocumentDone,
@@ -42,6 +47,59 @@ function documentsAreOlderThanYear(dateString) {
   const updated = new Date(dateString).getTime();
   if (!Number.isFinite(updated)) return true;
   return Date.now() - updated > 365 * 24 * 60 * 60 * 1000;
+}
+function fileExtension(message, mimeType) {
+  if (message.type === "document" && message.document?.filename) {
+    const match = message.document.filename.match(/\.([a-z0-9]+)$/i);
+    if (match) return `.${match[1].toLowerCase()}`;
+  }
+  const extensions = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "application/pdf": ".pdf",
+  };
+  return extensions[mimeType] || ".bin";
+}
+
+async function saveIncomingDocument(from, state, message, fileId, doc) {
+  const claimed = await claimMediaUpload(from, fileId);
+  if (!claimed) return false;
+
+  try {
+    const identifier = state.request.type === "military_unit"
+      ? state.request.data.militaryUnitNumber
+      : state.request.data.name;
+
+    if (!identifier) throw new Error("Applicant identifier is missing for Drive folder");
+
+    const folder = await getOrCreateApplicantFolder(state.request.type, identifier);
+    const media = await downloadWhatsAppMedia(fileId);
+    const sequence = await nextDocumentSequence(from, doc.key);
+    const extension = fileExtension(message, media.mimeType);
+    const fileName = `${doc.key === "official_request" ? "official_request" : doc.key}${sequence}${extension}`;
+    const driveFile = await uploadBufferToDrive({
+      buffer: media.buffer,
+      name: fileName,
+      mimeType: media.mimeType,
+      parentId: folder.id,
+    });
+
+    if (!state.request.documents[doc.key]) state.request.documents[doc.key] = [];
+    state.request.documents[doc.key].push({
+      mediaId: fileId,
+      type: message.type,
+      receivedAt: new Date().toISOString(),
+      driveFileId: driveFile.id,
+      driveUrl: driveFile.webViewLink || `https://drive.google.com/file/d/${driveFile.id}/view`,
+      fileName: driveFile.name,
+    });
+    await saveUserState(from, state);
+    return true;
+  } catch (error) {
+    await releaseMediaUploadClaim(from, fileId);
+    throw error;
+  }
 }
 
 async function showConfirmation(from, state) {
@@ -285,9 +343,8 @@ export default async function handler(req, res) {
         return res.status(200).send("EVENT_RECEIVED");
       }
       if (fileId) {
-        if (!state.request.documents[doc.key]) state.request.documents[doc.key] = [];
-        state.request.documents[doc.key].push({ mediaId: fileId, type: message.type, receivedAt: new Date().toISOString() });
-        await saveUserState(from, state);
+        const uploaded = await saveIncomingDocument(from, state, message, fileId, doc);
+        if (!uploaded) return res.status(200).send("EVENT_RECEIVED");
         await sendDocumentDone(from, doc.label, Boolean(doc.optional));
         return res.status(200).send("EVENT_RECEIVED");
       }
@@ -347,7 +404,6 @@ export default async function handler(req, res) {
       return res.status(200).send("EVENT_RECEIVED");
     }
 
-    // Editing data before final confirmation.
     if (state.stage === "CONFIRMATION" && buttonId === "edit_request") {
       state.stage = "EDIT_MENU";
       await saveUserState(from, state);
