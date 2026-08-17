@@ -113,8 +113,23 @@ function formatConfirmedAt(confirmedAt) {
 }
 
 export function serializeDocuments(files) {
-  if (!Array.isArray(files) || !files.length) return "";
-  return files.map((file, index) => `${index + 1}. ${file.fileName || "Файл"}\n${file.driveUrl || ""}`.trim()).join("\n\n");
+  return buildDocumentRichText(files).text;
+}
+
+export function buildDocumentRichText(files) {
+  if (!Array.isArray(files) || !files.length) return { text: "", textFormatRuns: [] };
+
+  let text = "";
+  const textFormatRuns = [];
+  files.forEach((file, index) => {
+    if (index > 0) text += "\n";
+    const startIndex = text.length;
+    text += file.fileName || "Файл";
+    if (file.driveUrl) textFormatRuns.push({ startIndex, format: { link: { uri: file.driveUrl } } });
+    if (index < files.length - 1) textFormatRuns.push({ startIndex: text.length, format: {} });
+  });
+
+  return { text, textFormatRuns };
 }
 
 function recipientValues(data) {
@@ -172,6 +187,47 @@ async function spreadsheetAlreadyHasApplicationId(sheetsApi, spreadsheetId, shee
   return (response.data.values || []).some((row) => row[0] === applicationId);
 }
 
+function getAppendedRowNumber(updatedRange) {
+  const match = typeof updatedRange === "string" && updatedRange.match(/![A-Z]+(\d+):[A-Z]+(\d+)$/);
+  if (!match || match[1] !== match[2]) throw new Error(`Unable to determine appended row from range: ${updatedRange || "missing"}`);
+  return Number(match[1]);
+}
+
+async function getSheetId(sheetsApi, spreadsheetId, sheetTitle) {
+  const response = await sheetsApi.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets(properties(sheetId,title))",
+  });
+  const sheet = (response.data.sheets || []).find((item) => item.properties?.title === sheetTitle);
+  const sheetId = sheet?.properties?.sheetId;
+  if (!Number.isInteger(sheetId)) throw new Error(`Unable to find sheet ID for: ${sheetTitle}`);
+  return sheetId;
+}
+
+async function applyDocumentRichText(sheetsApi, spreadsheetId, sheetTitle, rowNumber, documentCells) {
+  const cellsWithDocuments = documentCells.filter(({ richText }) => richText.text);
+  if (!cellsWithDocuments.length) return;
+
+  const sheetId = await getSheetId(sheetsApi, spreadsheetId, sheetTitle);
+  const requests = cellsWithDocuments.map(({ columnIndex, richText }) => ({
+    updateCells: {
+      range: {
+        sheetId,
+        startRowIndex: rowNumber - 1,
+        endRowIndex: rowNumber,
+        startColumnIndex: columnIndex,
+        endColumnIndex: columnIndex + 1,
+      },
+      rows: [{ values: [{
+        userEnteredValue: { stringValue: richText.text },
+        textFormatRuns: richText.textFormatRuns,
+      }] }],
+      fields: "userEnteredValue,textFormatRuns",
+    },
+  }));
+  await sheetsApi.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } });
+}
+
 export async function appendConfirmedRequest(request, applicationId, confirmedAt) {
   const spreadsheet = await getOrCreateCurrentMonthSpreadsheet();
   const sheetsApi = getSheets();
@@ -180,6 +236,15 @@ export async function appendConfirmedRequest(request, applicationId, confirmedAt
   const row = isMilitaryUnit
     ? buildMilitaryUnitRow(request, applicationId, confirmedAt)
     : buildPhysicalPersonRow(request, applicationId, confirmedAt);
+  const documents = request.documents || {};
+  const documentCells = isMilitaryUnit
+    ? [{ columnIndex: 7, richText: buildDocumentRichText(documents.official_request) }]
+    : [
+        { columnIndex: 6, richText: buildDocumentRichText(documents.passport) },
+        { columnIndex: 7, richText: buildDocumentRichText(documents.rnokpp) },
+        { columnIndex: 8, richText: buildDocumentRichText(documents.military_id) },
+        { columnIndex: 9, richText: buildDocumentRichText(documents.ubd) },
+      ];
 
   if (await spreadsheetAlreadyHasApplicationId(sheetsApi, spreadsheet.spreadsheetId, sheetTitle, applicationId)) {
     return { spreadsheetId: spreadsheet.spreadsheetId, sheetTitle, existing: true };
@@ -192,7 +257,15 @@ export async function appendConfirmedRequest(request, applicationId, confirmedAt
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: [row] },
   });
-  return { spreadsheetId: spreadsheet.spreadsheetId, sheetTitle, existing: false, updatedRange: response.data.updates?.updatedRange || null };
+  const updatedRange = response.data.updates?.updatedRange;
+  await applyDocumentRichText(
+    sheetsApi,
+    spreadsheet.spreadsheetId,
+    sheetTitle,
+    getAppendedRowNumber(updatedRange),
+    documentCells,
+  );
+  return { spreadsheetId: spreadsheet.spreadsheetId, sheetTitle, existing: false, updatedRange: updatedRange || null };
 }
 
 async function addHeadersIfSheetIsEmpty(sheetsApi, spreadsheetId, title, layout) {
