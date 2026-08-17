@@ -69,7 +69,7 @@ export function sendReturningApplicantMenu(to, lastDocumentsUpdatedAt) {
       type: "button",
       body: { text: `Для цього номера вже є збережені дані.\n\nДата останнього оновлення документів: ${date}\n\nВикористати збережені дані чи ввести їх заново?` },
       action: { buttons: [
-        { type: "reply", reply: { id: "use_saved_data", title: "Використати збережені" } },
+        { type: "reply", reply: { id: "use_saved_data", title: "Збережені дані" } },
         { type: "reply", reply: { id: "enter_data_again", title: "Ввести заново" } },
       ] },
     },
