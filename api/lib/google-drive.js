@@ -1,4 +1,7 @@
 import { google } from "googleapis";
+import { Readable } from "node:stream";
+
+const FOLDER_MIME = "application/vnd.google-apps.folder";
 
 function getConfig() {
   const clientId = process.env.GOOGLE_CLIENT_ID;
@@ -20,6 +23,10 @@ function getDrive() {
   return google.drive({ version: "v3", auth });
 }
 
+function escapeQueryValue(value) {
+  return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
 export async function getDriveRootFolder() {
   const { rootFolderId } = getConfig();
   const drive = getDrive();
@@ -28,21 +35,19 @@ export async function getDriveRootFolder() {
     fields: "id,name,mimeType,trashed",
     supportsAllDrives: true,
   });
-
   return response.data;
 }
 
 export async function findFolder(name, parentId) {
   const drive = getDrive();
-  const escapedName = name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  const escapedName = escapeQueryValue(name);
   const response = await drive.files.list({
-    q: `'${parentId}' in parents and name = '${escapedName}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+    q: `'${parentId}' in parents and name = '${escapedName}' and mimeType = '${FOLDER_MIME}' and trashed = false`,
     fields: "files(id,name,mimeType)",
     pageSize: 10,
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
   });
-
   return response.data.files?.[0] || null;
 }
 
@@ -54,17 +59,33 @@ export async function getOrCreateFolder(name, parentId) {
   const response = await drive.files.create({
     requestBody: {
       name,
-      mimeType: "application/vnd.google-apps.folder",
+      mimeType: FOLDER_MIME,
       parents: [parentId],
     },
     fields: "id,name,mimeType",
     supportsAllDrives: true,
   });
-
   return response.data;
 }
 
 export async function getOrCreateRootSubfolder(name) {
   const { rootFolderId } = getConfig();
   return getOrCreateFolder(name, rootFolderId);
+}
+
+export async function uploadBufferToDrive({ buffer, name, mimeType, parentId }) {
+  const drive = getDrive();
+  const response = await drive.files.create({
+    requestBody: {
+      name,
+      parents: [parentId],
+    },
+    media: {
+      mimeType: mimeType || "application/octet-stream",
+      body: Readable.from(buffer),
+    },
+    fields: "id,name,mimeType,size,webViewLink",
+    supportsAllDrives: true,
+  });
+  return response.data;
 }
