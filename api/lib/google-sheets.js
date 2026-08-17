@@ -24,6 +24,11 @@ const OPERATOR_SHEET_LAYOUTS = {
   },
 };
 
+const REQUEST_SHEET_CONFIGS = [
+  { title: "Фізособи", type: "individual", lastColumn: "O" },
+  { title: "Військові частини", type: "military_unit", lastColumn: "M" },
+];
+
 function getSheets() {
   return google.sheets({ version: "v4", auth: getGoogleAuth() });
 }
@@ -93,6 +98,111 @@ async function moveSpreadsheetToRootFolder(spreadsheetId, rootFolderId) {
 
 function sheetRange(title, range) {
   return `'${title}'!${range}`;
+}
+
+function monthlySpreadsheetNamesForYears(years) {
+  return new Set(years.flatMap((year) => Array.from(
+    { length: 12 },
+    (_, month) => getCurrentMonthSpreadsheetName(new Date(Date.UTC(year, month, 15, 12))),
+  )));
+}
+
+async function findMonthlySpreadsheetsForApplicationId(applicationId) {
+  const year = Number(applicationId.slice(0, 4));
+  const names = monthlySpreadsheetNamesForYears([year, year + 1]);
+  const { rootFolderId } = getGoogleConfig();
+  const drive = getDrive();
+  const files = [];
+  let pageToken;
+
+  do {
+    const response = await drive.files.list({
+      q: `'${rootFolderId}' in parents and mimeType = '${SPREADSHEET_MIME}' and trashed = false`,
+      fields: "nextPageToken,files(id,name,mimeType,parents)",
+      pageSize: 100,
+      pageToken,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+    files.push(...(response.data.files || []).filter((file) => file.name && names.has(file.name)));
+    pageToken = response.data.nextPageToken;
+  } while (pageToken);
+
+  return files;
+}
+
+async function findApplicationRowsInSpreadsheet(sheetsApi, spreadsheetId, applicationId) {
+  const response = await sheetsApi.spreadsheets.values.batchGet({
+    spreadsheetId,
+    ranges: REQUEST_SHEET_CONFIGS.map(({ title }) => sheetRange(title, "B2:B")),
+  });
+  const matches = [];
+  REQUEST_SHEET_CONFIGS.forEach((config, index) => {
+    const values = response.data.valueRanges?.[index]?.values || [];
+    values.forEach((row, rowOffset) => {
+      if (row[0] === applicationId) matches.push({ ...config, rowNumber: rowOffset + 2 });
+    });
+  });
+  return matches;
+}
+
+function normalizeRequestRow(type, row) {
+  const values = Array.from({ length: type === "individual" ? 15 : 13 }, (_, index) => valueOrEmpty(row[index]));
+  const isIndividual = type === "individual";
+  const personName = values[4];
+  const mainPhone = values[5];
+  const anotherRecipient = values[isIndividual ? 12 : 10];
+  const recipientName = values[isIndividual ? 13 : 11];
+  const recipientPhone = values[isIndividual ? 14 : 12];
+  let actualRecipientName;
+  let actualRecipientPhone;
+
+  if (anotherRecipient === "Так") {
+    actualRecipientName = recipientName;
+    actualRecipientPhone = recipientPhone;
+  } else if (anotherRecipient === "Ні") {
+    actualRecipientName = personName;
+    actualRecipientPhone = mainPhone;
+  } else {
+    return null;
+  }
+
+  return {
+    type,
+    applicationId: values[1],
+    date: values[2],
+    need: values[3],
+    personName,
+    mainPhone,
+    militaryUnitNumber: isIndividual ? "" : values[6],
+    city: values[isIndividual ? 10 : 8],
+    novaPoshtaBranch: values[isIndividual ? 11 : 9],
+    actualRecipientName,
+    actualRecipientPhone,
+  };
+}
+
+export async function findRequestByApplicationId(applicationId) {
+  const spreadsheets = await findMonthlySpreadsheetsForApplicationId(applicationId);
+  const sheetsApi = getSheets();
+  const matches = [];
+
+  for (const spreadsheet of spreadsheets) {
+    const rows = await findApplicationRowsInSpreadsheet(sheetsApi, spreadsheet.id, applicationId);
+    matches.push(...rows.map((row) => ({ ...row, spreadsheetId: spreadsheet.id })));
+  }
+
+  if (!matches.length) return { result: "not_found" };
+  if (matches.length > 1) return { result: "duplicate" };
+
+  const match = matches[0];
+  const rowResponse = await sheetsApi.spreadsheets.values.get({
+    spreadsheetId: match.spreadsheetId,
+    range: sheetRange(match.title, `A${match.rowNumber}:${match.lastColumn}${match.rowNumber}`),
+  });
+  const request = normalizeRequestRow(match.type, rowResponse.data.values?.[0] || []);
+  if (!request || request.applicationId !== applicationId) return { result: "invalid_data" };
+  return { result: "found", request };
 }
 
 function rowsMatchHeaders(actual, expected) {
