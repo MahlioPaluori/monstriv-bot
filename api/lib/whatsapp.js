@@ -82,6 +82,9 @@ export function sendEditMenu(to, type) {
         { type: "reply", reply: { id: "edit_name", title: "ПІБ" } },
         { type: "reply", reply: { id: "edit_unit_number", title: "Номер ВЧ" } },
         { type: "reply", reply: { id: "edit_need", title: "Потребу" } },
+        { type: "reply", reply: { id: "edit_city", title: "Місто" } },
+        { type: "reply", reply: { id: "edit_np", title: "Нову пошту" } },
+        { type: "reply", reply: { id: "edit_recipient", title: "Отримувача" } },
       ]
     : [
         { type: "reply", reply: { id: "edit_name", title: "ПІБ" } },

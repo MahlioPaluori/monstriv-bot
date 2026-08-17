@@ -91,7 +91,7 @@ async function continueAfterSavedData(from, state) {
 async function askDocument(from, state) {
   const doc = currentDoc(state);
   if (!doc) {
-    if (state.request.type === "military_unit" || state.request.usingSavedData) return showConfirmation(from, state);
+    if (state.request.usingSavedData) return showConfirmation(from, state);
     state.stage = "CITY";
     await saveUserState(from, state);
     return sendText(from, "Вкажіть, будь ласка, місто, до якого потрібно оформити отримання.");
@@ -104,10 +104,8 @@ function summary(state) {
   const count = Object.values(r.documents || {}).reduce((n, files) => n + (Array.isArray(files) ? files.length : 0), 0);
   const lines = ["Перевірте, будь ласка, дані заявки:", "", `Тип заявника: ${r.type === "individual" ? "Фізична особа" : "Військова частина"}`, `ПІБ: ${d.name || "—"}`, `Телефон: ${d.phone || state.phone || "—"}`];
   if (r.type === "military_unit") lines.push(`Номер військової частини: ${d.militaryUnitNumber || "—"}`);
-  else {
-    lines.push(`Місто: ${d.city || "—"}`, `Відділення Нової пошти: ${d.novaPoshtaBranch || "—"}`, d.recipientAnotherPerson ? `Отримувач: ${d.recipientName || "—"}` : "Отримувач: заявник");
-    if (d.recipientAnotherPerson) lines.push(`Телефон отримувача: ${d.recipientPhone || "—"}`);
-  }
+  lines.push(`Місто: ${d.city || "—"}`, `Відділення Нової пошти: ${d.novaPoshtaBranch || "—"}`, d.recipientAnotherPerson ? `Отримувач: ${d.recipientName || "—"}` : "Отримувач: заявник");
+  if (d.recipientAnotherPerson) lines.push(`Телефон отримувача: ${d.recipientPhone || "—"}`);
   lines.push(`Документів отримано: ${count}`, "", `Потреба: ${d.need || "—"}`, "", "Якщо все правильно, підтвердіть заявку.");
   return lines.join("\n");
 }
