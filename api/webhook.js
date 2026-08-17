@@ -132,7 +132,7 @@ export default async function handler(req, res) {
     const value = req.body?.entry?.[0]?.changes?.[0]?.value;
     const message = value?.messages?.[0];
     if (!message) return res.status(200).send("EVENT_RECEIVED");
-    const from = message.from, text = message.text?.body?.trim() || "", buttonId = message.interactive?.button_reply?.id || null, fileId = mediaId(message);
+    const from = message.from, text = message.text?.body?.trim() || "", buttonId = message.interactive?.button_reply?.id || message.interactive?.list_reply?.id || null, fileId = mediaId(message);
 
     if (["/reset", "reset"].includes(text.toLowerCase())) {
       await resetUserState(from); await sendText(from, "Тестову сесію скинуто. Починаємо заново."); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
