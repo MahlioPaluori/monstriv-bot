@@ -85,10 +85,8 @@ function requestCardPage(request) {
     .note-line { height: 11mm; border-bottom: 1px solid #b6b6b6; }
     .note-line:last-child { border-bottom: 0; }
     .shipping { border-top: 1px solid #777; padding-top: 11px; }
-    .shipping-grid { display: grid; grid-template-columns: 43mm 1fr; border: 1px solid #a8a8a8; }
-    .shipping-label, .shipping-value { min-height: 10mm; padding: 6px 9px; border-bottom: 1px solid #c3c3c3; }
-    .shipping-label { border-right: 1px solid #c3c3c3; color: #404040; font-weight: 700; }
-    .shipping-grid > :nth-last-child(-n + 2) { border-bottom: 0; }
+    .shipping-row { margin: 5px 0; }
+    .shipping-row strong { display: inline-block; min-width: 43mm; color: #404040; }
     @media print {
       body { background: #fff; }
       .screen-actions { display: none; }
@@ -117,12 +115,10 @@ function requestCardPage(request) {
     </section>
     <section class="shipping">
       <h2>ДАНІ ДЛЯ ВІДПРАВКИ</h2>
-      <div class="shipping-grid">
-        <div class="shipping-label">Отримувач:</div><div class="shipping-value">${displayValue(request.actualRecipientName)}</div>
-        <div class="shipping-label">Телефон:</div><div class="shipping-value">${displayValue(request.actualRecipientPhone)}</div>
-        <div class="shipping-label">Місто:</div><div class="shipping-value">${displayValue(request.city)}</div>
-        <div class="shipping-label">Нова пошта:</div><div class="shipping-value">${displayValue(request.novaPoshtaBranch)}</div>
-      </div>
+      <div class="shipping-row"><strong>Отримувач:</strong> <span>${displayValue(request.actualRecipientName)}</span></div>
+      <div class="shipping-row"><strong>Телефон:</strong> <span>${displayValue(request.actualRecipientPhone)}</span></div>
+      <div class="shipping-row"><strong>Місто:</strong> <span>${displayValue(request.city)}</span></div>
+      <div class="shipping-row"><strong>Нова пошта:</strong> <span>${displayValue(request.novaPoshtaBranch)}</span></div>
     </section>
   </main>
 </body>
