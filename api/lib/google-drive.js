@@ -27,6 +27,10 @@ function escapeQueryValue(value) {
   return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
+function safeFolderName(value) {
+  return String(value || "").trim().replace(/[\\/:*?"<>|]/g, "_").slice(0, 200) || "Без назви";
+}
+
 export async function getDriveRootFolder() {
   const { rootFolderId } = getConfig();
   const drive = getDrive();
@@ -58,7 +62,7 @@ export async function getOrCreateFolder(name, parentId) {
   const drive = getDrive();
   const response = await drive.files.create({
     requestBody: {
-      name,
+      name: safeFolderName(name),
       mimeType: FOLDER_MIME,
       parents: [parentId],
     },
@@ -73,11 +77,16 @@ export async function getOrCreateRootSubfolder(name) {
   return getOrCreateFolder(name, rootFolderId);
 }
 
+export async function getOrCreateApplicantFolder(type, identifier) {
+  const typeFolder = await getOrCreateRootSubfolder(type === "military_unit" ? "ВЧ" : "ФІЗ");
+  return getOrCreateFolder(identifier, typeFolder.id);
+}
+
 export async function uploadBufferToDrive({ buffer, name, mimeType, parentId }) {
   const drive = getDrive();
   const response = await drive.files.create({
     requestBody: {
-      name,
+      name: safeFolderName(name).replace(/\.(?=[^.]+$)/, ""),
       parents: [parentId],
     },
     media: {
