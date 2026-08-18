@@ -12,6 +12,18 @@ Monstriv Bot — WhatsApp-бот для структурованого збор�
 
 ## IMPLEMENTED: WhatsApp flows
 
+### Перший контакт
+
+Для нового WhatsApp phone перша обрана дія не губиться під час створення Redis state:
+
+```text
+send_request → state initialization → короткий welcome → APPLICANT_TYPE
+operator → state initialization → OPERATOR
+довільний текст/інша допустима подія → welcome → MAIN_MENU
+```
+
+Повторно натискати «Відправити запит» після першого `send_request` не потрібно; перед `operator` проміжне main menu не показується.
+
 ### Фізична особа
 
 Після «Відправити запит» користувач обирає «Фізична особа».
@@ -36,7 +48,7 @@ APPLICANT_TYPE
 
 ### Військова частина
 
-Поточний flow:
+Для нового contact поточний flow:
 
 ```text
 APPLICANT_TYPE
@@ -51,13 +63,15 @@ APPLICANT_TYPE
 → CONFIRMATION
 ```
 
-Отже після `official_request` ВЧ **не** переходить напряму до confirmation. Delivery fields для ВЧ використовують ті самі states, що й фізособа, і доступні в edit flow. ВЧ profile повторного користувача поки не зберігається.
+Отже після `official_request` ВЧ **не** переходить напряму до confirmation. Delivery fields для ВЧ використовують ті самі states, що й фізособа, і доступні в edit flow.
+
+Після першої успішно підтвердженої ВЧ-заявки persistent profile `wa:military-contact:<phone>` зберігає canonical ПІБ відповідальної особи. Номер ВЧ у profile не входить. При наступному виборі ВЧ з того самого phone бот автоматично встановлює збережене ПІБ і переходить прямо до `MILITARY_UNIT_NUMBER`. Якщо у confirmation через `edit_name` введено інше ПІБ, після успішного підтвердження саме воно стає новим canonical name.
 
 ### Confirmation
 
 У summary показуються тип, ПІБ, телефон, номер ВЧ (за потреби), доставка, кількість документів і потреба. Користувач підтверджує або переходить до edit flow.
 
-Успішний порядок операцій:
+Успішний порядок для фізособи:
 
 1. Стабілізувати `applicationId`, `confirmedAt` і початковий `sheetsRecorded` у Redis state.
 2. Записати заявку в Google Sheets.
@@ -66,14 +80,27 @@ APPLICANT_TYPE
 5. Надіслати WhatsApp success із тим самим ID.
 6. Викликати `resetUserState()`.
 
-При помилці Sheets state не очищається, а користувач може повторити confirm. `applicationId` не генерується в `sendText`/`sendMessage` і лишається стабільним між retry.
+Успішний порядок для ВЧ:
+
+1. Стабілізувати `applicationId`, `confirmedAt` і початковий `sheetsRecorded` у Redis state.
+2. Виконати Sheets append або existing-ID detection.
+3. Встановити `sheetsRecorded: true` і зберегти state.
+4. Перемістити/перейменувати official-request Drive files за фінальним `request.data.name`.
+5. Оновити `request.documents.official_request` і зберегти state.
+6. Оновити military document rich-text links у Sheets H.
+7. Зберегти military contact profile з фінальним ПІБ.
+8. Надіслати WhatsApp success із тим самим ID.
+9. Викликати `resetUserState()`.
+
+При помилці Sheets, Drive finalize або military Sheets H update state не очищається і success не надсилається. `applicationId` не генерується в `sendText`/`sendMessage` і лишається стабільним між retry.
 
 ## IMPLEMENTED: Redis та application ID
 
 Redis (`REDIS_URL`) зберігає:
 
 - `wa:user:<phone>` — розмовний state, TTL 7 днів;
-- `wa:profile:<phone>` — profile фізособи;
+- `wa:profile:<phone>` — persistent profile фізособи без TTL;
+- `wa:military-contact:<phone>` — незалежний persistent profile відповідальної особи ВЧ без TTL (`phone`, canonical `name`, `createdAt`, `updatedAt`); номер ВЧ не зберігається;
 - `requests:counter:<UTC-рік>` — лічильник заявок;
 - `wa:media:<phone>:<mediaId>` — media upload claim на 10 хвилин;
 - `wa:doc-ack:<phone>:<documentLabel>` — claim кнопки «Готово»;
@@ -87,7 +114,7 @@ Redis (`REDIS_URL`) зберігає:
 
 Google Drive використовує OAuth2 через `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` і `GOOGLE_DRIVE_ROOT_FOLDER_ID`.
 
-Фактична структура зараз:
+До confirmation документи завантажуються за структурою:
 
 ```text
 root/
@@ -95,19 +122,21 @@ root/
 └── ВЧ/<номер ВЧ>/
 ```
 
-Документи завантажуються безпосередньо в ці папки. Приклади назв: `passport1.jpg`, `rnokpp1.pdf`, `military_id1.jpg`, `ubd1.jpg`, `official_request1.pdf`. Для `document` розширення береться з filename; інакше визначається з MIME type або є `.bin`. Імена папок і файлів санітизуються.
+Приклади тимчасових upload-назв: `passport1.jpg`, `rnokpp1.pdf`, `military_id1.jpg`, `ubd1.jpg`, `official_request1.pdf`. Для `document` розширення береться з filename; інакше визначається з MIME type або є `.bin`. Імена папок і файлів санітизуються.
 
 У `request.documents.<documentKey>[]` зберігаються `mediaId`, WhatsApp type, `receivedAt`, `driveFileId`, `driveUrl` і `fileName`.
 
-### PLANNED: Drive hierarchy для ВЧ
+Після confirmation official-request documents ВЧ фіналізуються:
 
 ```text
 ВЧ/
 └── <номер ВЧ>/
-    └── <canonical ПІБ відповідальної особи>/
+    └── <фінальне ПІБ відповідальної особи>/
+        ├── <applicationId>_official_request1.<ext>
+        └── <applicationId>_official_request2.<ext>
 ```
 
-Ця підпапка **ще не реалізована**. Вона залежить від стабільної canonical-ідентифікації відповідальної особи, щоб варіанти написання ПІБ не створювали різні папки.
+Нумерація визначається порядком файлів у `request.documents.official_request`. Existing Drive resource переміщується й перейменовується без copy/re-upload, тому `driveFileId` залишається стабільним. Після finalize Redis metadata отримує фінальні `fileName`/актуальний `driveUrl`, а Sheets H показує ті самі filenames як окремі clickable links на відповідні Drive resources.
 
 ## IMPLEMENTED: Google Sheets
 
@@ -168,6 +197,8 @@ passport2.jpg
 
 Кожне filename є окремим clickable rich-text hyperlink на відповідний Drive file. Це працює і для одного, і для кількох файлів.
 
+Visible text у колонці B залишається exact `applicationId`, наприклад `2026-000001`, і автоматично стає clickable hyperlink на signed HTML request card. URL будується існуючим `buildRequestCardUrl()` із canonical production URL; raw URL та окрема колонка «Картка» не показуються.
+
 ## IMPLEMENTED: Printable request card
 
 Endpoint:
@@ -202,7 +233,7 @@ Lookup read-only, не викликає `getOrCreateCurrentMonthSpreadsheet()`, 
 
 Поточний дизайн функціональний; подальше UI polishing можливе, але не є пріоритетом.
 
-## TEMPORARY: Request card test URL endpoint
+## TEMPORARY / CURRENTLY RETAINED FOR TESTING
 
 `GET /api/request-card-test-url?id=<APPLICATION_ID>&token=<TEST_SECRET>` існує у `main`.
 
@@ -211,25 +242,16 @@ Lookup read-only, не викликає `getOrCreateCurrentMonthSpreadsheet()`, 
 - не читає Sheets і не перевіряє існування заявки;
 - не змінює дані.
 
-**TODO:** видалити або додатково обмежити endpoint після запуску clickable IDs у Sheets.
+`GET /api/request-card-links-test?token=<TEST_SECRET>`:
+
+- захищений тим самим `REQUEST_CARD_TEST_SECRET` через `timingSafeEqual`;
+- явно накладає clickable request-card links на valid IDs у колонці B обох листів current monthly spreadsheet;
+- пропускає вже правильні links і не змінює заявки чи інші колонки;
+- повертає лише лічильники `updated`, `alreadyCorrect`, `skipped`, без IDs, персональних даних або signed URLs.
+
+Обидва endpoints наразі свідомо залишаються для ширшого періоду тестування. Cleanup буде окремим пізнішим рішенням; `REQUEST_CARD_TEST_SECRET` залишається актуальним environment variable.
 
 ## PLANNED
-
-### Clickable request ID у Sheets
-
-Окрема колонка «Картка» не планується. Visible value у колонці `ID запиту` має стати clickable hyperlink на signed HTML request card. Visible text лишається exact application ID, наприклад `2026-000001`, без префіксів.
-
-### Military contact profile
-
-Після першої успішної ВЧ заявки потрібно зберігати profile:
-
-```text
-WhatsApp phone → canonical/stable ПІБ відповідальної особи
-```
-
-При наступній ВЧ заявці з того самого WhatsApp phone бот не питає і не пропонує повторно ввести ПІБ: автоматично використовує profile і переходить до наступного потрібного кроку. Номер ВЧ не прив'язується назавжди до цього profile, бо одна людина може подавати заявки для різних ВЧ.
-
-Ця задача передує planned Drive hierarchy `ВЧ/<номер ВЧ>/<canonical ПІБ відповідальної особи>/`.
 
 ### Інші майбутні задачі
 
@@ -240,11 +262,11 @@ WhatsApp phone → canonical/stable ПІБ відповідальної особ
 ## KNOWN RISKS
 
 1. Два паралельні confirms теоретично можуть обидва пройти lookup-before-append і створити duplicate row.
-2. Якщо базовий append успішний, а rich-text document formatting впаде, retry знайде ID і може не повторити formatting.
+2. Якщо базовий append фізособи успішний, а первинне rich-text document formatting впаде, retry знайде ID і може не повторити formatting; ВЧ document cell окремо оновлюється після Drive finalize.
 3. Permanent signed request-card URLs — bearer links.
 4. UTC-рік application ID і `Europe/Kyiv` month spreadsheet мають новорічну межу; request-card lookup шукає рік ID і наступний рік.
 5. ФІЗ Drive folders групуються за ПІБ: різні люди з однаковим ПІБ потенційно можуть потрапити в одну папку.
-6. Temporary `request-card-test-url` потрібно прибрати або обмежити після завершення інтеграції clickable ID.
+6. Temporary testing endpoints є захищеними bearer-token routes і мають бути переглянуті окремо після завершення ширшого тестування.
 7. Окремого загального deduplication key для кожного WhatsApp message ID немає; є media upload і document acknowledgement claims.
 
 ## Environment variables
@@ -262,7 +284,7 @@ WhatsApp phone → canonical/stable ПІБ відповідальної особ
 Актуальний HEAD на момент оновлення документації:
 
 ```text
-948dc42 Improve request card shipping copy format
+a29690f Finalize military request documents after confirmation
 ```
 
-Ключові недавні milestones: delivery flow для ВЧ (`37370fd`), Google Sheets monthly integration (`a7c4e12`), operator sheet structure (`480e61a`), Sheets append confirmed requests (`d816fd6`), printable request card (`5b60a60`) і подальші card UX improvements (`595a222`, `948dc42`).
+Ключові milestones після попереднього documentation sync `cab1cda`: npm lockfile/gitignore (`453300d`), military contact profile (`33d809e`), clickable request-card IDs і migration endpoint (`4d0797d`), first-contact UX (`75ac3e9`) та post-confirm military Drive/Sheets finalization (`a29690f`).

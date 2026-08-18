@@ -16,13 +16,14 @@ local VS Code → checks → commit → push main → Vercel deployment
 
 - `api/webhook.js` — Vercel webhook, Meta verification, WhatsApp state machine, документи, delivery і confirmation.
 - `api/lib/whatsapp.js` — WhatsApp Cloud API `v26.0`, текстові та інтерактивні повідомлення.
-- `api/lib/state.js` — Redis state, профілі фізосіб, counters і idempotency claims.
+- `api/lib/state.js` — Redis state, незалежні профілі фізосіб і відповідальних осіб ВЧ, counters та idempotency claims.
 - `api/lib/meta-media.js` — завантаження WhatsApp media у `Buffer`.
-- `api/lib/google-drive.js` — OAuth2 Google Drive, папки та document uploads.
-- `api/lib/google-sheets.js` — monthly operator spreadsheets, записи заявок, статуси, rich-text document links і request-card lookup.
+- `api/lib/google-drive.js` — OAuth2 Google Drive, папки, document uploads і post-confirm finalization документів ВЧ.
+- `api/lib/google-sheets.js` — monthly operator spreadsheets, записи заявок, статуси, clickable request IDs, rich-text document links і request-card lookup.
 - `api/sheets-test.js` — безпечна діагностика current monthly spreadsheet.
 - `api/request-card.js` — HMAC-захищена printable HTML-картка запиту.
-- `api/request-card-test-url.js` — тимчасовий endpoint генерації signed request-card URL.
+- `api/request-card-test-url.js` — тимчасовий, наразі збережений для тестування endpoint генерації signed request-card URL.
+- `api/request-card-links-test.js` — тимчасовий, наразі збережений для тестування endpoint міграції clickable request IDs у current monthly spreadsheet.
 
 Основні інтеграції: WhatsApp Cloud API, Redis, Google Drive API, Google Sheets API, Vercel і GitHub. State не можна тримати лише в пам'яті процесу: Vercel виконує незалежні serverless-запити.
 
@@ -43,12 +44,18 @@ local VS Code → checks → commit → push main → Vercel deployment
 
 1. Стабілізувати `applicationId` і `confirmedAt` у Redis.
 2. Записати заявку в Google Sheets.
-3. Позначити `sheetsRecorded`.
-4. Для фізособи зберегти profile.
-5. Відправити WhatsApp success.
-6. Лише після цього викликати `resetUserState()`.
+3. Позначити `sheetsRecorded: true` і зберегти state.
+4. Для фізособи зберегти `wa:profile:<phone>`.
+5. Для ВЧ перемістити й перейменувати existing Drive files у `ВЧ/<номер ВЧ>/<фінальне ПІБ>/`, оновити document metadata у state та rich-text links у Sheets H.
+6. Для ВЧ лише після Drive/Sheets finalize зберегти незалежний persistent profile `wa:military-contact:<phone>`; номер ВЧ у нього не входить.
+7. Відправити WhatsApp success.
+8. Лише після цього викликати `resetUserState()`.
 
-При Sheets failure state не очищати. Не генерувати `applicationId` приховано в `sendText` або `sendMessage`; ID має залишатися стабільним між retry.
+При Sheets, military Drive finalize або military Sheets H update failure state не очищати й success не надсилати. Retry не повинен дублювати Sheets row або Drive file: `applicationId` і `driveFileId` залишаються стабільними. Не генерувати `applicationId` приховано в `sendText` або `sendMessage`.
+
+Military та individual profiles мають окремі Redis keys і не перезаписують один одного. Returning military contact автоматично використовує canonical ПІБ і все одно щоразу вводить номер ВЧ; фінальний підтверджений `edit_name` оновлює canonical profile.
+
+У Sheets visible значення колонки B залишається exact `applicationId`, але є clickable signed request-card link. Не дублювати signing logic поза `buildRequestCardUrl()`.
 
 ## Secrets та environment variables
 
