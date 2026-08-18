@@ -434,6 +434,50 @@ export async function appendConfirmedRequest(request, applicationId, confirmedAt
   return { spreadsheetId: spreadsheet.spreadsheetId, sheetTitle, existing: false, updatedRange: updatedRange || null };
 }
 
+export async function updateMilitaryRequestDocumentLinks(applicationId, documents) {
+  if (typeof applicationId !== "string" || !APPLICATION_ID_PATTERN.test(applicationId)) throw new Error("Invalid application ID");
+  const spreadsheets = await findMonthlySpreadsheetsForApplicationId(applicationId);
+  const sheetsApi = getSheets();
+  const matches = [];
+
+  for (const spreadsheet of spreadsheets) {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId: spreadsheet.id,
+      range: sheetRange("Військові частини", "B2:B"),
+    });
+    (response.data.values || []).forEach((row, rowOffset) => {
+      if (row[0] === applicationId) matches.push({ spreadsheetId: spreadsheet.id, rowNumber: rowOffset + 2 });
+    });
+  }
+
+  if (!matches.length) throw new Error(`Military request row not found: ${applicationId}`);
+  if (matches.length > 1) throw new Error(`Duplicate military request row: ${applicationId}`);
+  const match = matches[0];
+  const richText = buildDocumentRichText(documents);
+  const sheetId = await getSheetId(sheetsApi, match.spreadsheetId, "Військові частини");
+  await sheetsApi.spreadsheets.batchUpdate({
+    spreadsheetId: match.spreadsheetId,
+    requestBody: {
+      requests: [{
+        updateCells: {
+          range: {
+            sheetId,
+            startRowIndex: match.rowNumber - 1,
+            endRowIndex: match.rowNumber,
+            startColumnIndex: 7,
+            endColumnIndex: 8,
+          },
+          rows: [{ values: [{
+            userEnteredValue: { stringValue: richText.text },
+            textFormatRuns: richText.textFormatRuns,
+          }] }],
+          fields: "userEnteredValue,textFormatRuns",
+        },
+      }],
+    },
+  });
+}
+
 function hasCorrectRequestCardLink(cell, applicationId, expectedUrl) {
   return cell?.userEnteredValue?.stringValue === applicationId && cell?.hyperlink === expectedUrl;
 }

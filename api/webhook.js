@@ -13,8 +13,8 @@ import {
   saveUserState,
 } from "./lib/state.js";
 import { downloadWhatsAppMedia } from "./lib/meta-media.js";
-import { getOrCreateApplicantFolder, uploadBufferToDrive } from "./lib/google-drive.js";
-import { appendConfirmedRequest } from "./lib/google-sheets.js";
+import { finalizeMilitaryRequestDocuments, getOrCreateApplicantFolder, uploadBufferToDrive } from "./lib/google-drive.js";
+import { appendConfirmedRequest, updateMilitaryRequestDocumentLinks } from "./lib/google-sheets.js";
 import {
   sendApplicationAccepted,
   sendApplicantTypeMenu,
@@ -147,7 +147,17 @@ async function confirmRequest(from, state) {
   }
 
   if (request.type === "individual") await saveApplicantProfile(from, request);
-  if (request.type === "military_unit") await saveMilitaryContactProfile(from, request.data.name);
+  if (request.type === "military_unit") {
+    request.documents.official_request = await finalizeMilitaryRequestDocuments({
+      militaryUnitNumber: request.data.militaryUnitNumber,
+      contactName: request.data.name,
+      applicationId: request.applicationId,
+      documents: request.documents.official_request,
+    });
+    await saveUserState(from, state);
+    await updateMilitaryRequestDocumentLinks(request.applicationId, request.documents.official_request);
+    await saveMilitaryContactProfile(from, request.data.name);
+  }
   await sendApplicationAccepted(from, request.applicationId);
   await resetUserState(from);
 }
