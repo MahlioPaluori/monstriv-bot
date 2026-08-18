@@ -171,8 +171,15 @@ export default async function handler(req, res) {
     if (!text && !buttonId && !fileId) { await sendText(from, "Будь ласка, скористайтеся кнопками меню або надішліть текстове повідомлення чи файл."); return res.status(200).send("EVENT_RECEIVED"); }
     let state = await getUserState(from);
     if (!state) {
-      state = await createUserState(from); state.request = { data: { phone: from }, documents: {}, documentIndex: 0 }; state.stage = "MAIN_MENU"; await saveUserState(from, state);
-      await sendText(from, "Вітаємо! Це бот для автоматизованого оформлення запитів.\n\nСпочатку ми визначимо заявника, потім уточнимо потребу та послідовно зберемо необхідні дані й документи. Після перевірки ви підтвердите заявку, а далі нею займатиметься оператор.\n\nОберіть потрібну дію нижче."); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
+      state = await createUserState(from); state.request = { data: { phone: from }, documents: {}, documentIndex: 0 };
+      if (buttonId === "send_request") {
+        state.operatorRequested = false; state.stage = "APPLICANT_TYPE"; state.request = { type: null, data: { phone: from }, documents: {}, documentIndex: 0 }; await saveUserState(from, state);
+        await sendText(from, "Вітаємо! Це бот для оформлення запитів.\n\nЗараз послідовно зберемо необхідні дані та документи."); await sendApplicantTypeMenu(from); return res.status(200).send("EVENT_RECEIVED");
+      }
+      if (buttonId !== "operator") {
+        state.stage = "MAIN_MENU"; await saveUserState(from, state);
+        await sendText(from, "Вітаємо! Це бот для автоматизованого оформлення запитів.\n\nСпочатку ми визначимо заявника, потім уточнимо потребу та послідовно зберемо необхідні дані й документи. Після перевірки ви підтвердите заявку, а далі нею займатиметься оператор.\n\nОберіть потрібну дію нижче."); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
+      }
     }
     if (buttonId === "operator") { state.operatorRequested = true; state.stage = "OPERATOR"; await saveUserState(from, state); await sendText(from, "Ваше повідомлення передано оператору. Очікуйте, будь ласка, відповіді."); return res.status(200).send("EVENT_RECEIVED"); }
     if (buttonId === "send_request") { state.operatorRequested = false; state.stage = "APPLICANT_TYPE"; state.request = { type: null, data: { phone: from }, documents: {}, documentIndex: 0 }; await saveUserState(from, state); await sendApplicantTypeMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
