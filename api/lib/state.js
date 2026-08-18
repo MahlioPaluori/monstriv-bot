@@ -25,6 +25,7 @@ async function getRedis() {
 
 function stateKey(phone) { return `wa:user:${phone}`; }
 function profileKey(phone) { return `wa:profile:${phone}`; }
+function militaryContactProfileKey(phone) { return `wa:military-contact:${phone}`; }
 function requestCounterKey() { return `requests:counter:${new Date().getUTCFullYear()}`; }
 function documentAckKey(phone, documentKey) { return `wa:doc-ack:${phone}:${documentKey}`; }
 function mediaClaimKey(phone, mediaId) { return `wa:media:${phone}:${mediaId}`; }
@@ -105,6 +106,42 @@ export async function saveApplicantProfile(phone, request) {
     updatedAt: now,
   };
   await redis.set(profileKey(phone), JSON.stringify(profile));
+  return profile;
+}
+
+export async function getMilitaryContactProfile(phone) {
+  const redis = await getRedis();
+  const raw = await redis.get(militaryContactProfileKey(phone));
+  if (!raw) return null;
+  try {
+    const profile = JSON.parse(raw);
+    if (!profile || typeof profile !== "object" || Array.isArray(profile)) return null;
+    if (profile.phone !== phone || typeof profile.name !== "string" || !profile.name.trim()) return null;
+    return {
+      phone,
+      name: profile.name.trim(),
+      createdAt: profile.createdAt,
+      updatedAt: profile.updatedAt,
+    };
+  } catch (error) {
+    console.error("Invalid military contact profile:", error);
+    return null;
+  }
+}
+
+export async function saveMilitaryContactProfile(phone, name) {
+  const normalizedName = typeof name === "string" ? name.trim() : "";
+  if (!normalizedName) return null;
+  const redis = await getRedis();
+  const previous = await getMilitaryContactProfile(phone);
+  const now = new Date().toISOString();
+  const profile = {
+    phone,
+    name: normalizedName,
+    createdAt: typeof previous?.createdAt === "string" && previous.createdAt ? previous.createdAt : now,
+    updatedAt: now,
+  };
+  await redis.set(militaryContactProfileKey(phone), JSON.stringify(profile));
   return profile;
 }
 

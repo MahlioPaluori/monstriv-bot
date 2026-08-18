@@ -3,11 +3,13 @@ import {
   createApplicationNumber,
   createUserState,
   getApplicantProfile,
+  getMilitaryContactProfile,
   getUserState,
   nextDocumentSequence,
   releaseMediaUploadClaim,
   resetUserState,
   saveApplicantProfile,
+  saveMilitaryContactProfile,
   saveUserState,
 } from "./lib/state.js";
 import { downloadWhatsAppMedia } from "./lib/meta-media.js";
@@ -145,6 +147,7 @@ async function confirmRequest(from, state) {
   }
 
   if (request.type === "individual") await saveApplicantProfile(from, request);
+  if (request.type === "military_unit") await saveMilitaryContactProfile(from, request.data.name);
   await sendApplicationAccepted(from, request.applicationId);
   await resetUserState(from);
 }
@@ -180,6 +183,9 @@ export default async function handler(req, res) {
         if (buttonId === "individual") {
           const profile = await getApplicantProfile(from);
           if (profile) { state.request.profile = profile; state.stage = "RETURNING_CHOICE"; await saveUserState(from, state); await sendReturningApplicantMenu(from, profile.lastDocumentsUpdatedAt); return res.status(200).send("EVENT_RECEIVED"); }
+        } else {
+          const profile = await getMilitaryContactProfile(from);
+          if (profile) { state.request.data.name = profile.name; state.stage = "MILITARY_UNIT_NUMBER"; await saveUserState(from, state); await sendText(from, "Вкажіть, будь ласка, номер військової частини."); return res.status(200).send("EVENT_RECEIVED"); }
         }
         state.stage = "IDENTIFICATION"; await saveUserState(from, state); await sendText(from, buttonId === "individual" ? "Для ідентифікації заявника вкажіть, будь ласка, ваше ПІБ." : "Для ідентифікації заявника вкажіть, будь ласка, ПІБ відповідальної особи.");
       } else await sendApplicantTypeMenu(from);
