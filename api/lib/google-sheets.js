@@ -4,6 +4,7 @@ import { getDrive, getGoogleAuth, getGoogleConfig } from "./google-drive.js";
 const SPREADSHEET_MIME = "application/vnd.google-apps.spreadsheet";
 const REQUIRED_SHEET_TITLES = ["Фізособи", "Військові частини"];
 const UKRAINE_TIME_ZONE = "Europe/Kyiv";
+const APPLICATION_ID_PATTERN = /^\d{4}-\d{6,}$/;
 export const DEFAULT_REQUEST_STATUS = "Нова";
 const REQUEST_STATUS_OPTIONS = ["Нова", "В роботі", "Зібрано", "Відхилено"];
 const REQUEST_STATUS_FORMATS = [
@@ -293,12 +294,13 @@ function buildMilitaryUnitRow(request, applicationId, confirmedAt) {
   ];
 }
 
-async function spreadsheetAlreadyHasApplicationId(sheetsApi, spreadsheetId, sheetTitle, applicationId) {
+async function findApplicationRowNumber(sheetsApi, spreadsheetId, sheetTitle, applicationId) {
   const response = await sheetsApi.spreadsheets.values.get({
     spreadsheetId,
     range: sheetRange(sheetTitle, "B2:B"),
   });
-  return (response.data.values || []).some((row) => row[0] === applicationId);
+  const rowOffset = (response.data.values || []).findIndex((row) => row[0] === applicationId);
+  return rowOffset === -1 ? null : rowOffset + 2;
 }
 
 function getAppendedRowNumber(updatedRange) {
@@ -342,6 +344,52 @@ async function applyDocumentRichText(sheetsApi, spreadsheetId, sheetTitle, rowNu
   await sheetsApi.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } });
 }
 
+async function buildRequestCardRichText(applicationId) {
+  const { buildRequestCardUrl } = await import("../request-card.js");
+  return {
+    text: applicationId,
+    textFormatRuns: [{ startIndex: 0, format: { link: { uri: buildRequestCardUrl(applicationId) } } }],
+  };
+}
+
+function requestCardLinkUpdate(sheetId, rowNumber, richText) {
+  return {
+    updateCells: {
+      range: {
+        sheetId,
+        startRowIndex: rowNumber - 1,
+        endRowIndex: rowNumber,
+        startColumnIndex: 1,
+        endColumnIndex: 2,
+      },
+      rows: [{ values: [{
+        userEnteredValue: { stringValue: richText.text },
+        textFormatRuns: richText.textFormatRuns,
+      }] }],
+      fields: "userEnteredValue,textFormatRuns",
+    },
+  };
+}
+
+async function applyRequestCardLink(sheetsApi, spreadsheetId, sheetTitle, rowNumber, applicationId) {
+  const sheetId = await getSheetId(sheetsApi, spreadsheetId, sheetTitle);
+  const richText = await buildRequestCardRichText(applicationId);
+  await sheetsApi.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: { requests: [requestCardLinkUpdate(sheetId, rowNumber, richText)] },
+  });
+}
+
+async function applyRequestCardLinkSafely(sheetsApi, spreadsheetId, sheetTitle, rowNumber, applicationId) {
+  try {
+    await applyRequestCardLink(sheetsApi, spreadsheetId, sheetTitle, rowNumber, applicationId);
+    return true;
+  } catch (error) {
+    console.error("Request card link formatting failed:", error?.message || "Unknown error");
+    return false;
+  }
+}
+
 export async function appendConfirmedRequest(request, applicationId, confirmedAt) {
   const spreadsheet = await getOrCreateCurrentMonthSpreadsheet();
   const sheetsApi = getSheets();
@@ -360,7 +408,9 @@ export async function appendConfirmedRequest(request, applicationId, confirmedAt
         { columnIndex: 9, richText: buildDocumentRichText(documents.ubd) },
       ];
 
-  if (await spreadsheetAlreadyHasApplicationId(sheetsApi, spreadsheet.spreadsheetId, sheetTitle, applicationId)) {
+  const existingRowNumber = await findApplicationRowNumber(sheetsApi, spreadsheet.spreadsheetId, sheetTitle, applicationId);
+  if (existingRowNumber !== null) {
+    await applyRequestCardLinkSafely(sheetsApi, spreadsheet.spreadsheetId, sheetTitle, existingRowNumber, applicationId);
     return { spreadsheetId: spreadsheet.spreadsheetId, sheetTitle, existing: true };
   }
 
@@ -372,14 +422,83 @@ export async function appendConfirmedRequest(request, applicationId, confirmedAt
     requestBody: { values: [row] },
   });
   const updatedRange = response.data.updates?.updatedRange;
+  const rowNumber = getAppendedRowNumber(updatedRange);
   await applyDocumentRichText(
     sheetsApi,
     spreadsheet.spreadsheetId,
     sheetTitle,
-    getAppendedRowNumber(updatedRange),
+    rowNumber,
     documentCells,
   );
+  await applyRequestCardLinkSafely(sheetsApi, spreadsheet.spreadsheetId, sheetTitle, rowNumber, applicationId);
   return { spreadsheetId: spreadsheet.spreadsheetId, sheetTitle, existing: false, updatedRange: updatedRange || null };
+}
+
+function hasCorrectRequestCardLink(cell, applicationId, expectedUrl) {
+  return cell?.userEnteredValue?.stringValue === applicationId && cell?.hyperlink === expectedUrl;
+}
+
+export async function ensureRequestCardLinks() {
+  const spreadsheet = await getOrCreateCurrentMonthSpreadsheet();
+  const sheetsApi = getSheets();
+  const valuesResponse = await sheetsApi.spreadsheets.values.batchGet({
+    spreadsheetId: spreadsheet.spreadsheetId,
+    ranges: REQUIRED_SHEET_TITLES.map((title) => sheetRange(title, "B2:B")),
+  });
+  const valuesByTitle = new Map(REQUIRED_SHEET_TITLES.map((title, index) => [
+    title,
+    valuesResponse.data.valueRanges?.[index]?.values || [],
+  ]));
+  const populatedRanges = REQUIRED_SHEET_TITLES
+    .map((title) => ({ title, rowCount: valuesByTitle.get(title).length }))
+    .filter(({ rowCount }) => rowCount > 0);
+
+  if (!populatedRanges.length) return { success: true, updated: 0, alreadyCorrect: 0, skipped: 0 };
+
+  const gridResponse = await sheetsApi.spreadsheets.get({
+    spreadsheetId: spreadsheet.spreadsheetId,
+    ranges: populatedRanges.map(({ title, rowCount }) => sheetRange(title, `B2:B${rowCount + 1}`)),
+    includeGridData: true,
+    fields: "sheets(properties(sheetId,title),data(startRow,rowData(values(userEnteredValue,hyperlink))))",
+  });
+  const sheetsByTitle = new Map((gridResponse.data.sheets || []).map((sheet) => [sheet.properties?.title, sheet]));
+  const requests = [];
+  let alreadyCorrect = 0;
+  let skipped = 0;
+
+  for (const { title } of populatedRanges) {
+    const sheet = sheetsByTitle.get(title);
+    const sheetId = sheet?.properties?.sheetId;
+    if (!Number.isInteger(sheetId)) throw new Error(`Required sheet is missing: ${title}`);
+    const rowData = sheet.data?.[0]?.rowData || [];
+    const values = valuesByTitle.get(title);
+
+    for (let rowOffset = 0; rowOffset < values.length; rowOffset += 1) {
+      const applicationId = values[rowOffset]?.[0];
+      if (typeof applicationId !== "string" || !APPLICATION_ID_PATTERN.test(applicationId)) {
+        skipped += 1;
+        continue;
+      }
+      const richText = await buildRequestCardRichText(applicationId);
+      const cell = rowData[rowOffset]?.values?.[0];
+      const expectedUrl = richText.textFormatRuns[0].format.link.uri;
+      if (hasCorrectRequestCardLink(cell, applicationId, expectedUrl)) {
+        alreadyCorrect += 1;
+        continue;
+      }
+      requests.push(requestCardLinkUpdate(sheetId, rowOffset + 2, richText));
+    }
+  }
+
+  const batchSize = 500;
+  for (let index = 0; index < requests.length; index += batchSize) {
+    await sheetsApi.spreadsheets.batchUpdate({
+      spreadsheetId: spreadsheet.spreadsheetId,
+      requestBody: { requests: requests.slice(index, index + batchSize) },
+    });
+  }
+
+  return { success: true, updated: requests.length, alreadyCorrect, skipped };
 }
 
 async function addHeadersIfSheetIsEmpty(sheetsApi, spreadsheetId, title, layout) {
