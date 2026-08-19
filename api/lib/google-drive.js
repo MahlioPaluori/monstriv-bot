@@ -106,6 +106,12 @@ export async function getOrCreateApplicantFolder(type, identifier) {
   return getOrCreateFolder(identifier, typeFolder.id);
 }
 
+export async function getOrCreateIndividualMultiBeneficiaryFolder(applicantName, beneficiaryName) {
+  const physicalRootFolder = await getOrCreateRootSubfolder("ФІЗ");
+  const applicantFolder = await getOrCreateFolder(requiredFolderName(applicantName, "Individual applicant name"), physicalRootFolder.id);
+  return getOrCreateFolder(requiredFolderName(beneficiaryName, "Individual beneficiary name"), applicantFolder.id);
+}
+
 export async function uploadBufferToDrive({ buffer, name, mimeType, parentId }) {
   const drive = getDrive();
   const response = await drive.files.create({
@@ -181,12 +187,44 @@ export async function finalizeMilitaryRequestDocuments({ militaryUnitNumber, con
   return finalizedDocuments;
 }
 
+async function cleanupEmptyMultiParentFolder(drive, folderId, protectedFolderIds) {
+  if (!folderId || protectedFolderIds.has(folderId)) return;
+  try {
+    const folderResponse = await drive.files.get({
+      fileId: folderId,
+      fields: "id,mimeType,trashed",
+      supportsAllDrives: true,
+    });
+    const folder = folderResponse.data;
+    if (!folder.id || folder.trashed || folder.mimeType !== FOLDER_MIME) return;
+
+    const childrenResponse = await drive.files.list({
+      q: `'${folderId}' in parents and trashed = false`,
+      fields: "files(id)",
+      pageSize: 1,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+    if (childrenResponse.data.files?.length) return;
+
+    await drive.files.update({
+      fileId: folderId,
+      requestBody: { trashed: true },
+      fields: "id,trashed",
+      supportsAllDrives: true,
+    });
+  } catch (error) {
+    console.error("Empty multi folder cleanup failed:", error?.message || "Unknown error");
+  }
+}
+
 export async function finalizeIndividualMultiRequestDocuments({ applicantName, applicationId, beneficiaries }) {
   if (typeof applicationId !== "string" || !APPLICATION_ID_PATTERN.test(applicationId)) throw new Error("Invalid application ID");
   if (!Array.isArray(beneficiaries) || beneficiaries.length < 2) throw new Error("Multi request beneficiaries are invalid");
 
   const applicantFolderName = requiredFolderName(applicantName, "Individual applicant name");
-  const applicantFolder = await getOrCreateApplicantFolder("individual", applicantFolderName);
+  const physicalRootFolder = await getOrCreateRootSubfolder("ФІЗ");
+  const applicantFolder = await getOrCreateFolder(applicantFolderName, physicalRootFolder.id);
   const drive = getDrive();
   const documentKeys = ["passport", "rnokpp", "military_id", "ubd"];
   const finalizedBeneficiaries = [];
@@ -241,6 +279,11 @@ export async function finalizeIndividualMultiRequestDocuments({ applicantName, a
             supportsAllDrives: true,
           });
           finalized = updateResponse.data;
+        }
+
+        const protectedFolderIds = new Set([physicalRootFolder.id, applicantFolder.id, beneficiaryFolder.id]);
+        for (const previousParentId of parentsToRemove) {
+          await cleanupEmptyMultiParentFolder(drive, previousParentId, protectedFolderIds);
         }
 
         finalizedDocuments[documentKey].push({

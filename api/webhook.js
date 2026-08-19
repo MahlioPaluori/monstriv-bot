@@ -13,7 +13,7 @@ import {
   saveUserState,
 } from "./lib/state.js";
 import { downloadWhatsAppMedia } from "./lib/meta-media.js";
-import { finalizeIndividualMultiRequestDocuments, finalizeMilitaryRequestDocuments, getOrCreateApplicantFolder, uploadBufferToDrive } from "./lib/google-drive.js";
+import { finalizeIndividualMultiRequestDocuments, finalizeMilitaryRequestDocuments, getOrCreateApplicantFolder, getOrCreateIndividualMultiBeneficiaryFolder, uploadBufferToDrive } from "./lib/google-drive.js";
 import { appendConfirmedMultiRequest, appendConfirmedRequest, updateMilitaryRequestDocumentLinks } from "./lib/google-sheets.js";
 import {
   sendApplicationAccepted,
@@ -102,13 +102,14 @@ async function saveIncomingDocument(from, state, message, fileId, doc) {
   if (!claimed) return false;
   try {
     const beneficiary = activeBeneficiary(state);
-    const identifier = state.request.type === "military_unit"
-      ? state.request.data.militaryUnitNumber
-      : beneficiary
-        ? `${beneficiary.name} — Особа ${state.request.currentBeneficiaryIndex + 1}`
-        : state.request.data.name;
-    if (!identifier) throw new Error("Applicant identifier is missing for Drive folder");
-    const folder = await getOrCreateApplicantFolder(state.request.type, identifier);
+    let folder;
+    if (beneficiary) {
+      folder = await getOrCreateIndividualMultiBeneficiaryFolder(state.request.data.name, beneficiary.name);
+    } else {
+      const identifier = state.request.type === "military_unit" ? state.request.data.militaryUnitNumber : state.request.data.name;
+      if (!identifier) throw new Error("Applicant identifier is missing for Drive folder");
+      folder = await getOrCreateApplicantFolder(state.request.type, identifier);
+    }
     const media = await downloadWhatsAppMedia(fileId);
     const sequenceScope = beneficiary ? `multi:${state.request.currentBeneficiaryIndex}:${doc.key}` : doc.key;
     const sequence = await nextDocumentSequence(from, sequenceScope);
