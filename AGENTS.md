@@ -18,8 +18,8 @@ local VS Code → checks → commit → push main → Vercel deployment
 - `api/lib/whatsapp.js` — WhatsApp Cloud API `v26.0`, текстові та інтерактивні повідомлення.
 - `api/lib/state.js` — Redis state, незалежні профілі фізосіб і відповідальних осіб ВЧ, counters та idempotency claims.
 - `api/lib/meta-media.js` — завантаження WhatsApp media у `Buffer`.
-- `api/lib/google-drive.js` — OAuth2 Google Drive, папки, document uploads і post-confirm finalization документів ВЧ.
-- `api/lib/google-sheets.js` — monthly operator spreadsheets, записи заявок, статуси, clickable request IDs, rich-text document links і request-card lookup.
+- `api/lib/google-drive.js` — OAuth2 Google Drive, папки, document uploads і post-confirm finalization документів ВЧ та multi-заявок фізосіб.
+- `api/lib/google-sheets.js` — monthly operator spreadsheets, single rows, multi master/detail blocks, statuses, clickable request IDs, rich-text document links і request-card lookup.
 - `api/sheets-test.js` — безпечна діагностика current monthly spreadsheet.
 - `api/request-card.js` — HMAC-захищена printable HTML-картка запиту.
 - `api/request-card-test-url.js` — тимчасовий, наразі збережений для тестування endpoint генерації signed request-card URL.
@@ -40,7 +40,9 @@ local VS Code → checks → commit → push main → Vercel deployment
 
 ### Confirmation flow
 
-Порядок успішного підтвердження критичний:
+Single individual і military paths не рефакторити через multi. Single зберігає `request.documents`/`request.documentIndex`, один Sheets row і current Drive/profile behavior. Multi використовує `request.beneficiaries[]`; applicant (`request.data`), beneficiary і recipient — різні ролі. Beneficiary існує лише всередині request: його phone не є persistent identity, не використовується для profile lookup/save, а його documents не стають saved applicant documents.
+
+Порядок успішного підтвердження single/ВЧ критичний:
 
 1. Стабілізувати `applicationId` і `confirmedAt` у Redis.
 2. Записати заявку в Google Sheets.
@@ -53,9 +55,17 @@ local VS Code → checks → commit → push main → Vercel deployment
 
 При Sheets, military Drive finalize або military Sheets H update failure state не очищати й success не надсилати. Retry не повинен дублювати Sheets row або Drive file: `applicationId` і `driveFileId` залишаються стабільними. Не генерувати `applicationId` приховано в `sendText` або `sendMessage`.
 
+Для individual multi порядок окремий і критичний: стабілізувати `applicationId`/`confirmedAt` → зберегти state → finalizувати existing Drive files за `driveFileId` у `ФІЗ/<фінальний applicant>/<фінальний beneficiary>/` → зберегти beneficiary metadata → завершити Sheets master/detail block, rich-text, clickable master ID і grouping → лише тоді `sheetsRecorded: true` → safe applicant profile handling → WhatsApp success → reset. До повного Drive/Sheets success state не очищати. `applicationId` не є Drive folder level; він входить у final multi filenames, а `driveFileId` не змінюється.
+
+Multi Sheets: один master row із real/clickable `applicationId` у B і N grouped detail rows із labels `Особа 1`, `Особа 2`, … у B. Detail labels не є application IDs і не отримують request-card links. Не ламати matrix-write/retry recovery або не включати master у row group.
+
+Drive hierarchy не змішувати: ВЧ — `ВЧ/<номер ВЧ>/<ПІБ>/`; individual single — `ФІЗ/<ПІБ>/`; individual multi collection/finalization — `ФІЗ/<applicant>/<beneficiary>/`. Нові root-level `<beneficiary> — Особа N` folders створювати не можна. Military та single paths мають залишатися без змін.
+
 Military та individual profiles мають окремі Redis keys і не перезаписують один одного. Returning military contact автоматично використовує canonical ПІБ і все одно щоразу вводить номер ВЧ; фінальний підтверджений `edit_name` оновлює canonical profile.
 
 У Sheets visible значення колонки B залишається exact `applicationId`, але є clickable signed request-card link. Не дублювати signing logic поза `buildRequestCardUrl()`.
+
+`api/request-card-test-url.js` і `api/request-card-links-test.js` — temporary endpoints, currently retained for testing; не видаляти випадково. Поточну роботу над production WhatsApp Business App + Cloud API Coexistence не змінювати без окремого запиту: onboarding ще не завершений.
 
 ## Secrets та environment variables
 
