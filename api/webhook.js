@@ -13,15 +13,17 @@ import {
   saveUserState,
 } from "./lib/state.js";
 import { downloadWhatsAppMedia } from "./lib/meta-media.js";
-import { finalizeMilitaryRequestDocuments, getOrCreateApplicantFolder, uploadBufferToDrive } from "./lib/google-drive.js";
-import { appendConfirmedRequest, updateMilitaryRequestDocumentLinks } from "./lib/google-sheets.js";
+import { finalizeIndividualMultiRequestDocuments, finalizeMilitaryRequestDocuments, getOrCreateApplicantFolder, uploadBufferToDrive } from "./lib/google-drive.js";
+import { appendConfirmedMultiRequest, appendConfirmedRequest, updateMilitaryRequestDocumentLinks } from "./lib/google-sheets.js";
 import {
   sendApplicationAccepted,
   sendApplicantTypeMenu,
+  sendBeneficiaryEditFieldMenu,
   sendDocumentDone,
   sendEditMenu,
   sendMainMenu,
   sendOptionalDocumentPrompt,
+  sendPackageModeMenu,
   sendReturningApplicantMenu,
   sendText,
   sendYesNoMenu,
@@ -34,9 +36,48 @@ const PHYSICAL_DOCUMENTS = [
   { key: "ubd", label: "🏅 Посвідчення УБД", optional: true },
 ];
 const MILITARY_UNIT_DOCUMENTS = [{ key: "official_request", label: "📄 Офіційний запит" }];
+const MAX_MULTI_BENEFICIARIES = 5;
+const REQUIRED_PHYSICAL_DOCUMENT_KEYS = PHYSICAL_DOCUMENTS.filter((doc) => !doc.optional).map((doc) => doc.key);
 
 function docs(state) { return state.request?.type === "military_unit" ? MILITARY_UNIT_DOCUMENTS : PHYSICAL_DOCUMENTS; }
-function currentDoc(state) { return docs(state)[state.request.documentIndex || 0] || null; }
+function activeBeneficiary(state) { return state.request?.multiPackage ? state.request.beneficiaries?.[state.request.currentBeneficiaryIndex] || null : null; }
+function activeDocumentStore(state) { return activeBeneficiary(state) || state.request; }
+function currentDoc(state) { return docs(state)[activeDocumentStore(state).documentIndex || 0] || null; }
+function normalizePhone(value) {
+  const compact = String(value || "").trim().replace(/[\s()-]/g, "");
+  if (!/^\+?\d{7,15}$/.test(compact)) return null;
+  return compact;
+}
+function beneficiaryIsComplete(beneficiary) {
+  return Boolean(beneficiary?.name?.trim()
+    && normalizePhone(beneficiary.phone)
+    && REQUIRED_PHYSICAL_DOCUMENT_KEYS.every((key) => beneficiary.documents?.[key]?.length));
+}
+function beneficiariesAreComplete(state) {
+  const request = state.request;
+  return Boolean(request?.multiPackage
+    && Number.isInteger(request.beneficiaryCount)
+    && request.beneficiaryCount >= 2
+    && request.beneficiaryCount <= MAX_MULTI_BENEFICIARIES
+    && request.beneficiaries?.length === request.beneficiaryCount
+    && request.beneficiaries.every(beneficiaryIsComplete));
+}
+function clearSavedMultiFields(request, from) {
+  const applicantName = request.data?.name;
+  const need = request.data?.need;
+  request.data = { name: applicantName, phone: from, need };
+  request.documents = {};
+  request.documentIndex = 0;
+  request.multiPackage = true;
+  request.usingSavedApplicantIdentity = Boolean(request.usingSavedData);
+  request.usingSavedData = false;
+  delete request.savedDocumentsUpdatedAt;
+  delete request.profile;
+}
+function parseMultiDocumentButton(buttonId) {
+  const match = /^document_(done|skip)_(\d+)_(passport|rnokpp|military_id|ubd)$/.exec(buttonId || "");
+  return match ? { action: match[1], beneficiaryIndex: Number(match[2]), documentKey: match[3] } : null;
+}
 function mediaId(message) {
   if (message.type === "image") return message.image?.id || null;
   if (message.type === "document") return message.document?.id || null;
@@ -60,16 +101,23 @@ async function saveIncomingDocument(from, state, message, fileId, doc) {
   const claimed = await claimMediaUpload(from, fileId);
   if (!claimed) return false;
   try {
-    const identifier = state.request.type === "military_unit" ? state.request.data.militaryUnitNumber : state.request.data.name;
+    const beneficiary = activeBeneficiary(state);
+    const identifier = state.request.type === "military_unit"
+      ? state.request.data.militaryUnitNumber
+      : beneficiary
+        ? `${beneficiary.name} — Особа ${state.request.currentBeneficiaryIndex + 1}`
+        : state.request.data.name;
     if (!identifier) throw new Error("Applicant identifier is missing for Drive folder");
     const folder = await getOrCreateApplicantFolder(state.request.type, identifier);
     const media = await downloadWhatsAppMedia(fileId);
-    const sequence = await nextDocumentSequence(from, doc.key);
+    const sequenceScope = beneficiary ? `multi:${state.request.currentBeneficiaryIndex}:${doc.key}` : doc.key;
+    const sequence = await nextDocumentSequence(from, sequenceScope);
     const extension = fileExtension(message, media.mimeType);
     const fileName = `${doc.key}${sequence}${extension}`;
     const driveFile = await uploadBufferToDrive({ buffer: media.buffer, name: fileName, mimeType: media.mimeType, parentId: folder.id });
-    if (!state.request.documents[doc.key]) state.request.documents[doc.key] = [];
-    state.request.documents[doc.key].push({ mediaId: fileId, type: message.type, receivedAt: new Date().toISOString(), driveFileId: driveFile.id, driveUrl: driveFile.webViewLink || `https://drive.google.com/file/d/${driveFile.id}/view`, fileName: driveFile.name });
+    const store = activeDocumentStore(state);
+    if (!store.documents[doc.key]) store.documents[doc.key] = [];
+    store.documents[doc.key].push({ mediaId: fileId, type: message.type, receivedAt: new Date().toISOString(), driveFileId: driveFile.id, driveUrl: driveFile.webViewLink || `https://drive.google.com/file/d/${driveFile.id}/view`, fileName: driveFile.name });
     await saveUserState(from, state);
     return true;
   } catch (error) {
@@ -79,9 +127,25 @@ async function saveIncomingDocument(from, state, message, fileId, doc) {
 }
 
 async function showConfirmation(from, state) {
+  if (state.request?.multiPackage && !beneficiariesAreComplete(state)) {
+    await sendText(from, "Не всі дані або обов'язкові документи осіб заповнено. Будь ласка, завершіть поточний комплект документів.");
+    return askDocument(from, state);
+  }
   state.stage = "CONFIRMATION";
   await saveUserState(from, state);
-  await sendText(from, summary(state));
+  if (state.request.multiPackage) {
+    const { data, beneficiaries } = state.request;
+    await sendText(from, ["Перевірте, будь ласка, дані заявки:", "", "Заявник:", `ПІБ: ${data.name || "—"}`, `Телефон: ${data.phone || from}`, "", "Потреба:", data.need || "—", "", "Особи та документи:"].join("\n"));
+    for (let index = 0; index < beneficiaries.length; index += 1) {
+      const beneficiary = beneficiaries[index];
+      const documentLines = PHYSICAL_DOCUMENTS.map((doc) => {
+        const count = beneficiary.documents?.[doc.key]?.length || 0;
+        return `${doc.label.replace(/^\S+\s/, "")}: ${count ? `завантажено (${count})` : "не додано"}`;
+      });
+      await sendText(from, [`Особа ${index + 1}:`, `ПІБ: ${beneficiary.name}`, `Телефон: ${beneficiary.phone}`, ...documentLines].join("\n"));
+    }
+    await sendText(from, ["Доставка:", `Місто: ${data.city || "—"}`, `Нова пошта: ${data.novaPoshtaBranch || "—"}`, data.recipientAnotherPerson ? "Отримувач: інша особа" : "Отримувач: заявник", ...(data.recipientAnotherPerson ? [`ПІБ отримувача: ${data.recipientName || "—"}`, `Телефон отримувача: ${data.recipientPhone || "—"}`] : [])].join("\n"));
+  } else await sendText(from, summary(state));
   await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
 }
 async function continueAfterSavedData(from, state) {
@@ -96,12 +160,27 @@ async function continueAfterSavedData(from, state) {
 async function askDocument(from, state) {
   const doc = currentDoc(state);
   if (!doc) {
+    if (state.request.multiPackage) {
+      if (!beneficiaryIsComplete(activeBeneficiary(state))) {
+        return sendText(from, "Не всі обов'язкові дані або документи поточної особи заповнено.");
+      }
+      if (state.request.currentBeneficiaryIndex + 1 < state.request.beneficiaryCount) {
+        state.request.currentBeneficiaryIndex += 1;
+        state.stage = "BENEFICIARY_NAME";
+        await saveUserState(from, state);
+        return sendText(from, `Вкажіть ПІБ особи ${state.request.currentBeneficiaryIndex + 1}, якій належать документи цього комплекту.`);
+      }
+    }
     if (state.request.usingSavedData) return showConfirmation(from, state);
     state.stage = "CITY";
     await saveUserState(from, state);
     return sendText(from, "Вкажіть, будь ласка, місто, до якого потрібно оформити отримання.");
   }
-  if (doc.optional) return sendOptionalDocumentPrompt(from, doc.label);
+  if (doc.optional) {
+    const beneficiary = activeBeneficiary(state);
+    const context = beneficiary ? { beneficiaryIndex: state.request.currentBeneficiaryIndex, documentKey: doc.key } : null;
+    return sendOptionalDocumentPrompt(from, doc.label, context);
+  }
   await sendText(from, `Будь ласка, надішліть ${doc.label}.\n\nМожна надіслати один або кілька файлів/фото цього документа. Після того як усе надіслано, натисніть «Готово».`);
 }
 function summary(state) {
@@ -139,6 +218,24 @@ async function confirmRequest(from, state) {
     persistedConfirmationData = true;
   }
   if (persistedConfirmationData) await saveUserState(from, state);
+
+  if (request.type === "individual" && request.multiPackage) {
+    request.beneficiaries = await finalizeIndividualMultiRequestDocuments({
+      applicantName: request.data.name,
+      applicationId: request.applicationId,
+      beneficiaries: request.beneficiaries,
+    });
+    await saveUserState(from, state);
+
+    await appendConfirmedMultiRequest(request, request.applicationId, request.confirmedAt);
+    request.sheetsRecorded = true;
+    await saveUserState(from, state);
+
+    await saveApplicantProfile(from, request);
+    await sendApplicationAccepted(from, request.applicationId);
+    await resetUserState(from);
+    return;
+  }
 
   if (!request.sheetsRecorded) {
     await appendConfirmedRequest(request, request.applicationId, request.confirmedAt);
@@ -217,13 +314,31 @@ export default async function handler(req, res) {
     }
     if (state.stage === "IDENTIFICATION" && text) { state.request.data.name = text; if (state.request.type === "military_unit") { state.stage = "MILITARY_UNIT_NUMBER"; await saveUserState(from, state); await sendText(from, "Вкажіть, будь ласка, номер військової частини."); } else { state.stage = "REQUEST_TYPE"; await saveUserState(from, state); await sendText(from, "Дякую. Тепер напишіть, будь ласка, який саме запит ви хочете подати."); } return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "MILITARY_UNIT_NUMBER" && text) { state.request.data.militaryUnitNumber = text; state.stage = "REQUEST_TYPE"; await saveUserState(from, state); await sendText(from, "Тепер напишіть, будь ласка, який саме запит ви хочете подати."); return res.status(200).send("EVENT_RECEIVED"); }
-    if (state.stage === "REQUEST_TYPE" && text) { state.request.data.need = text; if (state.request.usingSavedData && Object.keys(state.request.documents || {}).length) { await saveUserState(from, state); await continueAfterSavedData(from, state); } else { state.stage = "DOCUMENTS"; state.request.documentIndex = 0; await saveUserState(from, state); await askDocument(from, state); } return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "REQUEST_TYPE" && text) { state.request.data.need = text; if (state.request.type === "individual") { state.stage = "PACKAGE_MODE"; await saveUserState(from, state); await sendPackageModeMenu(from); } else { state.stage = "DOCUMENTS"; state.request.documentIndex = 0; await saveUserState(from, state); await askDocument(from, state); } return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "PACKAGE_MODE") {
+      if (buttonId === "package_single") { state.request.multiPackage = false; if (state.request.usingSavedData && Object.keys(state.request.documents || {}).length) { await saveUserState(from, state); await continueAfterSavedData(from, state); } else { state.stage = "DOCUMENTS"; state.request.documentIndex = 0; await saveUserState(from, state); await askDocument(from, state); } }
+      else if (buttonId === "package_multi") { clearSavedMultiFields(state.request, from); state.stage = "PACKAGE_COUNT"; await saveUserState(from, state); await sendText(from, `Скільки окремих осіб мають надати документи? Введіть ціле число від 2 до ${MAX_MULTI_BENEFICIARIES}.`); }
+      else await sendPackageModeMenu(from);
+      return res.status(200).send("EVENT_RECEIVED");
+    }
+    if (state.stage === "PACKAGE_COUNT") {
+      const count = /^\d+$/.test(text) ? Number(text) : NaN;
+      if (!Number.isInteger(count) || count < 2 || count > MAX_MULTI_BENEFICIARIES) { await sendText(from, `Введіть ціле число від 2 до ${MAX_MULTI_BENEFICIARIES}.`); return res.status(200).send("EVENT_RECEIVED"); }
+      state.request.beneficiaryCount = count; state.request.currentBeneficiaryIndex = 0; state.request.beneficiaries = Array.from({ length: count }, () => ({ name: "", phone: "", documents: {}, documentIndex: 0 })); state.stage = "BENEFICIARY_NAME"; await saveUserState(from, state); await sendText(from, "Вкажіть ПІБ особи 1, якій належать документи цього комплекту."); return res.status(200).send("EVENT_RECEIVED");
+    }
+    if (state.stage === "BENEFICIARY_NAME" && text) { const beneficiary = activeBeneficiary(state); beneficiary.name = text; state.stage = "BENEFICIARY_PHONE"; await saveUserState(from, state); await sendText(from, "Вкажіть контактний номер телефону особи, якій належать документи цього комплекту."); return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "BENEFICIARY_PHONE") { const phone = normalizePhone(text); if (!phone) { await sendText(from, "Вкажіть коректний номер телефону: 7–15 цифр, за потреби з початковим +. Пробіли, дефіси та дужки допускаються."); return res.status(200).send("EVENT_RECEIVED"); } const beneficiary = activeBeneficiary(state); beneficiary.phone = phone; beneficiary.documentIndex = 0; state.stage = "DOCUMENTS"; await saveUserState(from, state); await askDocument(from, state); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "DOCUMENT_UPDATE_DECISION") { if (buttonId === "update_documents_yes") { state.request.documents = {}; state.request.documentIndex = 0; state.request.usingSavedData = false; state.stage = "DOCUMENTS"; await saveUserState(from, state); await askDocument(from, state); } else if (buttonId === "update_documents_no") await showConfirmation(from, state); else await sendYesNoMenu(from, "Ваші документи були оновлені понад рік тому. Бажаєте завантажити актуальні документи?", "update_documents_yes", "update_documents_no"); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "DOCUMENTS") {
       const doc = currentDoc(state); if (!doc) { await askDocument(from, state); return res.status(200).send("EVENT_RECEIVED"); }
-      if (fileId) { const uploaded = await saveIncomingDocument(from, state, message, fileId, doc); if (!uploaded) return res.status(200).send("EVENT_RECEIVED"); await sendDocumentDone(from, doc.label, Boolean(doc.optional)); return res.status(200).send("EVENT_RECEIVED"); }
-      if (buttonId === "document_done") { const files = state.request.documents[doc.key] || []; if (!files.length) { await sendText(from, `Будь ласка, спочатку надішліть ${doc.label}.`); return res.status(200).send("EVENT_RECEIVED"); } state.request.documentIndex += 1; await saveUserState(from, state); await askDocument(from, state); return res.status(200).send("EVENT_RECEIVED"); }
-      if (buttonId === "document_skip" && doc.optional) { state.request.documentIndex += 1; await saveUserState(from, state); await askDocument(from, state); return res.status(200).send("EVENT_RECEIVED"); }
+      const store = activeDocumentStore(state); const multiContext = state.request.multiPackage ? { beneficiaryIndex: state.request.currentBeneficiaryIndex, documentKey: doc.key } : null;
+      if (fileId) { const uploaded = await saveIncomingDocument(from, state, message, fileId, doc); if (!uploaded) return res.status(200).send("EVENT_RECEIVED"); await sendDocumentDone(from, doc.label, Boolean(doc.optional), multiContext); return res.status(200).send("EVENT_RECEIVED"); }
+      const parsedButton = state.request.multiPackage ? parseMultiDocumentButton(buttonId) : null;
+      if (state.request.multiPackage && buttonId?.startsWith("document_") && (!parsedButton || parsedButton.beneficiaryIndex !== state.request.currentBeneficiaryIndex || parsedButton.documentKey !== doc.key)) return res.status(200).send("EVENT_RECEIVED");
+      const donePressed = state.request.multiPackage ? parsedButton?.action === "done" : buttonId === "document_done";
+      const skipPressed = state.request.multiPackage ? parsedButton?.action === "skip" : buttonId === "document_skip";
+      if (donePressed) { const files = store.documents[doc.key] || []; if (!files.length) { await sendText(from, `Будь ласка, спочатку надішліть ${doc.label}.`); return res.status(200).send("EVENT_RECEIVED"); } store.documentIndex += 1; await saveUserState(from, state); await askDocument(from, state); return res.status(200).send("EVENT_RECEIVED"); }
+      if (skipPressed && doc.optional) { store.documentIndex += 1; await saveUserState(from, state); await askDocument(from, state); return res.status(200).send("EVENT_RECEIVED"); }
     }
     if (state.stage === "CITY" && text) { state.request.data.city = text; state.stage = "NOVA_POSHTA_BRANCH"; await saveUserState(from, state); await sendText(from, "Вкажіть, будь ласка, номер або адресу відділення Нової пошти."); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "NOVA_POSHTA_BRANCH" && text) { state.request.data.novaPoshtaBranch = text; state.stage = "RECIPIENT_CHOICE"; await saveUserState(from, state); await sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "recipient_other_yes", "recipient_other_no"); return res.status(200).send("EVENT_RECEIVED"); }
@@ -231,18 +346,22 @@ export default async function handler(req, res) {
     if (state.stage === "RECIPIENT_NAME" && text) { state.request.data.recipientName = text; state.stage = "RECIPIENT_PHONE"; await saveUserState(from, state); await sendText(from, "Вкажіть, будь ласка, номер телефону іншого отримувача."); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "RECIPIENT_PHONE" && text) { state.request.data.recipientPhone = text; await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); }
 
-    if (state.stage === "CONFIRMATION" && buttonId === "edit_request") { state.stage = "EDIT_MENU"; await saveUserState(from, state); await sendEditMenu(from, state.request.type); return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "CONFIRMATION" && buttonId === "edit_request") { state.stage = "EDIT_MENU"; await saveUserState(from, state); await sendEditMenu(from, state.request.type, state.request.multiPackage); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_MENU") {
       const prompts = { edit_name: ["name", "Введіть нове ПІБ."], edit_need: ["need", "Введіть новий опис запиту."], edit_unit_number: ["militaryUnitNumber", "Введіть новий номер військової частини."], edit_city: ["city", "Введіть нове місто."], edit_np: ["novaPoshtaBranch", "Введіть нове відділення Нової пошти."] };
       if (buttonId === "edit_recipient") { state.stage = "EDIT_RECIPIENT_CHOICE"; await saveUserState(from, state); await sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "edit_recipient_other_yes", "edit_recipient_other_no"); return res.status(200).send("EVENT_RECEIVED"); }
+      if (buttonId === "edit_beneficiary" && state.request.multiPackage) { state.stage = "EDIT_BENEFICIARY_SELECT"; await saveUserState(from, state); await sendText(from, `Введіть номер особи, дані якої потрібно змінити: від 1 до ${state.request.beneficiaryCount}.`); return res.status(200).send("EVENT_RECEIVED"); }
       const selected = prompts[buttonId]; if (selected) { state.editField = selected[0]; state.stage = "EDIT_TEXT"; await saveUserState(from, state); await sendText(from, selected[1]); return res.status(200).send("EVENT_RECEIVED"); }
-      await sendEditMenu(from, state.request.type); return res.status(200).send("EVENT_RECEIVED");
+      await sendEditMenu(from, state.request.type, state.request.multiPackage); return res.status(200).send("EVENT_RECEIVED");
     }
+    if (state.stage === "EDIT_BENEFICIARY_SELECT") { const selected = /^\d+$/.test(text) ? Number(text) - 1 : NaN; if (!Number.isInteger(selected) || selected < 0 || selected >= state.request.beneficiaryCount) { await sendText(from, `Введіть номер особи від 1 до ${state.request.beneficiaryCount}.`); return res.status(200).send("EVENT_RECEIVED"); } state.editBeneficiaryIndex = selected; state.stage = "EDIT_BENEFICIARY_FIELD"; await saveUserState(from, state); await sendBeneficiaryEditFieldMenu(from, selected + 1); return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "EDIT_BENEFICIARY_FIELD") { if (buttonId === "edit_beneficiary_name" || buttonId === "edit_beneficiary_phone") { state.editBeneficiaryField = buttonId === "edit_beneficiary_name" ? "name" : "phone"; state.stage = "EDIT_BENEFICIARY_TEXT"; await saveUserState(from, state); await sendText(from, state.editBeneficiaryField === "name" ? "Введіть нове ПІБ особи." : "Введіть новий контактний номер телефону особи."); } else await sendBeneficiaryEditFieldMenu(from, state.editBeneficiaryIndex + 1); return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "EDIT_BENEFICIARY_TEXT") { const beneficiary = state.request.beneficiaries?.[state.editBeneficiaryIndex]; if (!beneficiary) { await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); } if (state.editBeneficiaryField === "phone") { const phone = normalizePhone(text); if (!phone) { await sendText(from, "Вкажіть коректний номер телефону: 7–15 цифр, за потреби з початковим +."); return res.status(200).send("EVENT_RECEIVED"); } beneficiary.phone = phone; } else if (state.editBeneficiaryField === "name" && text) beneficiary.name = text; else { await sendText(from, "Введіть непорожнє ПІБ."); return res.status(200).send("EVENT_RECEIVED"); } delete state.editBeneficiaryIndex; delete state.editBeneficiaryField; await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_TEXT" && text) { state.request.data[state.editField] = text; delete state.editField; await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_RECIPIENT_CHOICE") { if (buttonId === "edit_recipient_other_yes") { state.request.data.recipientAnotherPerson = true; state.stage = "EDIT_RECIPIENT_NAME"; await saveUserState(from, state); await sendText(from, "Введіть нове ПІБ іншого отримувача."); } else if (buttonId === "edit_recipient_other_no") { state.request.data.recipientAnotherPerson = false; delete state.request.data.recipientName; delete state.request.data.recipientPhone; await showConfirmation(from, state); } else await sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "edit_recipient_other_yes", "edit_recipient_other_no"); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_RECIPIENT_NAME" && text) { state.request.data.recipientName = text; state.stage = "EDIT_RECIPIENT_PHONE"; await saveUserState(from, state); await sendText(from, "Введіть новий номер телефону іншого отримувача."); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_RECIPIENT_PHONE" && text) { state.request.data.recipientPhone = text; await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); }
-    if (state.stage === "CONFIRMATION") { if (buttonId === "confirm_request") { try { await confirmRequest(from, state); } catch (error) { console.error("Request confirmation error:", error); try { await sendText(from, "Не вдалося зареєструвати заявку через тимчасову технічну помилку. Будь ласка, натисніть «Підтвердити заявку» ще раз."); } catch (messageError) { console.error("Confirmation error message failed:", messageError); } } } else if (buttonId === "edit_request") { state.stage = "EDIT_MENU"; await saveUserState(from, state); await sendEditMenu(from, state.request.type); } return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "CONFIRMATION") { if (buttonId === "confirm_request") { try { await confirmRequest(from, state); } catch (error) { console.error("Request confirmation error:", error); try { await sendText(from, "Не вдалося зареєструвати заявку через тимчасову технічну помилку. Будь ласка, натисніть «Підтвердити заявку» ще раз."); } catch (messageError) { console.error("Confirmation error message failed:", messageError); } } } else if (buttonId === "edit_request") { state.stage = "EDIT_MENU"; await saveUserState(from, state); await sendEditMenu(from, state.request.type, state.request.multiPackage); } return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "OPERATOR") return res.status(200).send("EVENT_RECEIVED");
     if (state.stage === "CONFIRMED") { await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
     await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");

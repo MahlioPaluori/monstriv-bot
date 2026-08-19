@@ -276,6 +276,36 @@ function buildPhysicalPersonRow(request, applicationId, confirmedAt) {
   ];
 }
 
+function buildMultiMasterRow(request, applicationId, confirmedAt) {
+  const data = request.data || {};
+  return [
+    DEFAULT_REQUEST_STATUS,
+    applicationId,
+    formatConfirmedAt(confirmedAt),
+    valueOrEmpty(data.need),
+    valueOrEmpty(data.name),
+    valueOrEmpty(data.phone),
+    "", "", "", "",
+    valueOrEmpty(data.city),
+    valueOrEmpty(data.novaPoshtaBranch),
+    ...recipientValues(data),
+  ];
+}
+
+function buildMultiDetailRow(beneficiary, index) {
+  const documents = beneficiary?.documents || {};
+  return [
+    "", `Особа ${index + 1}`, "", "",
+    valueOrEmpty(beneficiary?.name),
+    valueOrEmpty(beneficiary?.phone),
+    serializeDocuments(documents.passport),
+    serializeDocuments(documents.rnokpp),
+    serializeDocuments(documents.military_id),
+    serializeDocuments(documents.ubd),
+    "", "", "", "", "",
+  ];
+}
+
 function buildMilitaryUnitRow(request, applicationId, confirmedAt) {
   const data = request.data || {};
   const documents = request.documents || {};
@@ -303,10 +333,31 @@ async function findApplicationRowNumber(sheetsApi, spreadsheetId, sheetTitle, ap
   return rowOffset === -1 ? null : rowOffset + 2;
 }
 
+async function findApplicationRowNumbers(sheetsApi, spreadsheetId, sheetTitle, applicationId) {
+  const response = await sheetsApi.spreadsheets.values.get({
+    spreadsheetId,
+    range: sheetRange(sheetTitle, "B2:B"),
+  });
+  const matches = [];
+  (response.data.values || []).forEach((row, rowOffset) => {
+    if (row[0] === applicationId) matches.push(rowOffset + 2);
+  });
+  return matches;
+}
+
 function getAppendedRowNumber(updatedRange) {
   const match = typeof updatedRange === "string" && updatedRange.match(/![A-Z]+(\d+):[A-Z]+(\d+)$/);
   if (!match || match[1] !== match[2]) throw new Error(`Unable to determine appended row from range: ${updatedRange || "missing"}`);
   return Number(match[1]);
+}
+
+function getAppendedRowBlock(updatedRange, expectedRowCount) {
+  const match = typeof updatedRange === "string" && updatedRange.match(/![A-Z]+(\d+):[A-Z]+(\d+)$/);
+  if (!match) throw new Error(`Unable to determine appended rows from range: ${updatedRange || "missing"}`);
+  const startRow = Number(match[1]);
+  const endRow = Number(match[2]);
+  if (endRow - startRow + 1 !== expectedRowCount) throw new Error("Appended multi row count does not match beneficiaries");
+  return { masterRowNumber: startRow, firstDetailRowNumber: startRow + 1, lastDetailRowNumber: endRow };
 }
 
 async function getSheetId(sheetsApi, spreadsheetId, sheetTitle) {
@@ -342,6 +393,25 @@ async function applyDocumentRichText(sheetsApi, spreadsheetId, sheetTitle, rowNu
     },
   }));
   await sheetsApi.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } });
+}
+
+function documentRichTextUpdates(sheetId, rowNumber, documents) {
+  return [
+    [6, documents?.passport],
+    [7, documents?.rnokpp],
+    [8, documents?.military_id],
+    [9, documents?.ubd],
+  ].flatMap(([columnIndex, files]) => {
+    const richText = buildDocumentRichText(files);
+    if (!richText.text) return [];
+    return [{
+      updateCells: {
+        range: { sheetId, startRowIndex: rowNumber - 1, endRowIndex: rowNumber, startColumnIndex: columnIndex, endColumnIndex: columnIndex + 1 },
+        rows: [{ values: [{ userEnteredValue: { stringValue: richText.text }, textFormatRuns: richText.textFormatRuns }] }],
+        fields: "userEnteredValue,textFormatRuns",
+      },
+    }];
+  });
 }
 
 async function buildRequestCardRichText(applicationId) {
@@ -432,6 +502,118 @@ export async function appendConfirmedRequest(request, applicationId, confirmedAt
   );
   await applyRequestCardLinkSafely(sheetsApi, spreadsheet.spreadsheetId, sheetTitle, rowNumber, applicationId);
   return { spreadsheetId: spreadsheet.spreadsheetId, sheetTitle, existing: false, updatedRange: updatedRange || null };
+}
+
+async function ensureMultiDetailRows(sheetsApi, spreadsheetId, sheetId, masterRowNumber, beneficiaries) {
+  const expectedLabels = beneficiaries.map((_, index) => `Особа ${index + 1}`);
+  const response = await sheetsApi.spreadsheets.values.get({
+    spreadsheetId,
+    range: sheetRange("Фізособи", `B${masterRowNumber + 1}:B${masterRowNumber + beneficiaries.length + 1}`),
+  });
+  const existingLabels = Array.from({ length: beneficiaries.length + 1 }, (_, index) => response.data.values?.[index]?.[0] || "");
+  let existingPrefix = 0;
+  while (existingPrefix < expectedLabels.length && existingLabels[existingPrefix] === expectedLabels[existingPrefix]) existingPrefix += 1;
+  if (existingPrefix === expectedLabels.length) {
+    if (/^Особа \d+$/.test(existingLabels[expectedLabels.length])) throw new Error(`Unexpected extra multi detail row after request at row ${masterRowNumber}`);
+    return;
+  }
+  if (/^Особа \d+$/.test(existingLabels[existingPrefix])) throw new Error(`Inconsistent multi detail block at row ${masterRowNumber + existingPrefix + 1}`);
+
+  const missingRows = beneficiaries.length - existingPrefix;
+  const insertionStartIndex = masterRowNumber + existingPrefix;
+  await sheetsApi.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: { requests: [{
+      insertDimension: {
+        range: { sheetId, dimension: "ROWS", startIndex: insertionStartIndex, endIndex: insertionStartIndex + missingRows },
+        inheritFromBefore: false,
+      },
+    }] },
+  });
+  await sheetsApi.spreadsheets.values.update({
+    spreadsheetId,
+    range: sheetRange("Фізособи", `A${masterRowNumber + existingPrefix + 1}`),
+    valueInputOption: "RAW",
+    requestBody: { values: beneficiaries.slice(existingPrefix).map((beneficiary, index) => buildMultiDetailRow(beneficiary, existingPrefix + index)) },
+  });
+}
+
+async function ensureMultiRowGroup(sheetsApi, spreadsheetId, sheetId, firstDetailRowNumber, lastDetailRowNumber) {
+  const targetRange = { sheetId, dimension: "ROWS", startIndex: firstDetailRowNumber - 1, endIndex: lastDetailRowNumber };
+  const metadata = await sheetsApi.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets(properties(sheetId),rowGroups(range,depth,collapsed))",
+  });
+  const sheet = (metadata.data.sheets || []).find((item) => item.properties?.sheetId === sheetId);
+  const rowGroups = sheet?.rowGroups || [];
+  const exactGroup = rowGroups.find((group) => group.range?.startIndex === targetRange.startIndex && group.range?.endIndex === targetRange.endIndex);
+  const overlapsTarget = rowGroups.some((group) => group.range?.startIndex < targetRange.endIndex && group.range?.endIndex > targetRange.startIndex);
+  if (!exactGroup && overlapsTarget) throw new Error(`Conflicting row group for multi detail rows ${firstDetailRowNumber}-${lastDetailRowNumber}`);
+
+  if (!exactGroup) {
+    await sheetsApi.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: [{ addDimensionGroup: { range: targetRange } }] } });
+  }
+  if (!exactGroup?.collapsed) {
+    await sheetsApi.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: [{ updateDimensionGroup: { dimensionGroup: { range: targetRange, depth: exactGroup?.depth || 1, collapsed: true }, fields: "collapsed" } }] },
+    });
+  }
+}
+
+export async function appendConfirmedMultiRequest(request, applicationId, confirmedAt) {
+  if (request.type !== "individual" || request.multiPackage !== true) throw new Error("Invalid individual multi request");
+  if (typeof applicationId !== "string" || !APPLICATION_ID_PATTERN.test(applicationId)) throw new Error("Invalid application ID");
+  const beneficiaries = request.beneficiaries;
+  if (!Array.isArray(beneficiaries) || beneficiaries.length < 2 || beneficiaries.length !== request.beneficiaryCount) throw new Error("Invalid multi beneficiaries");
+
+  const spreadsheet = await getOrCreateCurrentMonthSpreadsheet();
+  const sheetsApi = getSheets();
+  const sheetTitle = "Фізособи";
+  const sheetId = await getSheetId(sheetsApi, spreadsheet.spreadsheetId, sheetTitle);
+  const existingMasterRows = await findApplicationRowNumbers(sheetsApi, spreadsheet.spreadsheetId, sheetTitle, applicationId);
+  if (existingMasterRows.length > 1) throw new Error(`Duplicate multi request master row: ${applicationId}`);
+  let masterRowNumber = existingMasterRows[0] || null;
+
+  if (masterRowNumber === null) {
+    const rows = [buildMultiMasterRow(request, applicationId, confirmedAt), ...beneficiaries.map(buildMultiDetailRow)];
+    const response = await sheetsApi.spreadsheets.values.append({
+      spreadsheetId: spreadsheet.spreadsheetId,
+      range: sheetRange(sheetTitle, "A:O"),
+      valueInputOption: "RAW",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: rows },
+    });
+    ({ masterRowNumber } = getAppendedRowBlock(response.data.updates?.updatedRange, rows.length));
+  } else {
+    await ensureMultiDetailRows(sheetsApi, spreadsheet.spreadsheetId, sheetId, masterRowNumber, beneficiaries);
+    if (request.sheetsRecorded !== true) {
+      await sheetsApi.spreadsheets.values.update({
+        spreadsheetId: spreadsheet.spreadsheetId,
+        range: sheetRange(sheetTitle, `A${masterRowNumber}`),
+        valueInputOption: "RAW",
+        requestBody: { values: [buildMultiMasterRow(request, applicationId, confirmedAt), ...beneficiaries.map(buildMultiDetailRow)] },
+      });
+    }
+  }
+
+  const firstDetailRowNumber = masterRowNumber + 1;
+  const lastDetailRowNumber = masterRowNumber + beneficiaries.length;
+  const masterRichText = await buildRequestCardRichText(applicationId);
+  const formattingRequests = [
+    requestCardLinkUpdate(sheetId, masterRowNumber, masterRichText),
+    ...beneficiaries.map((_, index) => ({
+      updateCells: {
+        range: { sheetId, startRowIndex: firstDetailRowNumber + index - 1, endRowIndex: firstDetailRowNumber + index, startColumnIndex: 1, endColumnIndex: 2 },
+        rows: [{ values: [{ userEnteredValue: { stringValue: `Особа ${index + 1}` }, textFormatRuns: [] }] }],
+        fields: "userEnteredValue,textFormatRuns",
+      },
+    })),
+    ...beneficiaries.flatMap((beneficiary, index) => documentRichTextUpdates(sheetId, firstDetailRowNumber + index, beneficiary.documents)),
+  ];
+  await sheetsApi.spreadsheets.batchUpdate({ spreadsheetId: spreadsheet.spreadsheetId, requestBody: { requests: formattingRequests } });
+  await ensureMultiRowGroup(sheetsApi, spreadsheet.spreadsheetId, sheetId, firstDetailRowNumber, lastDetailRowNumber);
+  return { spreadsheetId: spreadsheet.spreadsheetId, sheetTitle, masterRowNumber, firstDetailRowNumber, lastDetailRowNumber };
 }
 
 export async function updateMilitaryRequestDocumentLinks(applicationId, documents) {

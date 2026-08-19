@@ -95,6 +95,17 @@ export async function saveApplicantProfile(phone, request) {
   const redis = await getRedis();
   const previous = await getApplicantProfile(phone);
   const now = new Date().toISOString();
+  if (request.multiPackage) {
+    if (!previous) return null;
+    const profile = {
+      ...previous,
+      phone,
+      data: { ...(previous.data || {}), name: request.data?.name, phone },
+      updatedAt: now,
+    };
+    await redis.set(profileKey(phone), JSON.stringify(profile));
+    return profile;
+  }
   const documentsWereUpdated = !request.usingSavedData;
   const lastDocumentsUpdatedAt = documentsWereUpdated ? now : (previous?.lastDocumentsUpdatedAt || request.savedDocumentsUpdatedAt || now);
   const profile = {

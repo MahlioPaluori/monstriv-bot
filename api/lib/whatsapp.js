@@ -61,6 +61,15 @@ export function sendApplicantTypeMenu(to) {
   });
 }
 
+export function sendPackageModeMenu(to) {
+  return sendMessage(to, {
+    type: "interactive", interactive: { type: "button", body: { text: "Для скількох осіб потрібно додати документи?" }, action: { buttons: [
+      { type: "reply", reply: { id: "package_single", title: "Одна особа" } },
+      { type: "reply", reply: { id: "package_multi", title: "Кілька осіб" } },
+    ] } },
+  });
+}
+
 export function sendReturningApplicantMenu(to, lastDocumentsUpdatedAt) {
   const date = lastDocumentsUpdatedAt ? new Date(lastDocumentsUpdatedAt).toLocaleDateString("uk-UA") : "дата невідома";
   return sendMessage(to, {
@@ -76,7 +85,7 @@ export function sendReturningApplicantMenu(to, lastDocumentsUpdatedAt) {
   });
 }
 
-export function sendEditMenu(to, type) {
+export function sendEditMenu(to, type, multiPackage = false) {
   const buttons = type === "military_unit"
     ? [
         { type: "reply", reply: { id: "edit_name", title: "ПІБ" } },
@@ -92,6 +101,7 @@ export function sendEditMenu(to, type) {
         { type: "reply", reply: { id: "edit_city", title: "Місто" } },
         { type: "reply", reply: { id: "edit_np", title: "Нову пошту" } },
         { type: "reply", reply: { id: "edit_recipient", title: "Отримувача" } },
+        ...(multiPackage ? [{ type: "reply", reply: { id: "edit_beneficiary", title: "Дані особи" } }] : []),
       ];
 
   return sendMessage(to, {
@@ -104,7 +114,8 @@ export function sendEditMenu(to, type) {
   });
 }
 
-export function sendOptionalDocumentPrompt(to, documentLabel) {
+export function sendOptionalDocumentPrompt(to, documentLabel, context = null) {
+  const suffix = context ? `_${context.beneficiaryIndex}_${context.documentKey}` : "";
   return sendMessage(to, {
     type: "interactive",
     interactive: {
@@ -114,20 +125,31 @@ export function sendOptionalDocumentPrompt(to, documentLabel) {
       },
       action: {
         buttons: [
-          { type: "reply", reply: { id: "document_skip", title: "⏭ Пропустити" } },
+          { type: "reply", reply: { id: `document_skip${suffix}`, title: "⏭ Пропустити" } },
         ],
       },
     },
   });
 }
 
-export async function sendDocumentDone(to, documentLabel, allowSkip = false) {
-  const claimed = await claimDocumentAcknowledgement(to, documentLabel);
+export async function sendDocumentDone(to, documentLabel, allowSkip = false, context = null) {
+  const acknowledgementKey = context ? `multi:${context.beneficiaryIndex}:${context.documentKey}` : documentLabel;
+  const claimed = await claimDocumentAcknowledgement(to, acknowledgementKey);
   if (!claimed) return null;
-  const buttons = [{ type: "reply", reply: { id: "document_done", title: "✅ Готово" } }];
-  if (allowSkip) buttons.push({ type: "reply", reply: { id: "document_skip", title: "⏭ Пропустити" } });
+  const suffix = context ? `_${context.beneficiaryIndex}_${context.documentKey}` : "";
+  const buttons = [{ type: "reply", reply: { id: `document_done${suffix}`, title: "✅ Готово" } }];
+  if (allowSkip) buttons.push({ type: "reply", reply: { id: `document_skip${suffix}`, title: "⏭ Пропустити" } });
   return sendMessage(to, {
     type: "interactive", interactive: { type: "button", body: { text: `${documentLabel}\n\nФайл отримано. Якщо ви додали всі сторінки/файли цього документа, натисніть «Готово».` }, action: { buttons } },
+  });
+}
+
+export function sendBeneficiaryEditFieldMenu(to, beneficiaryNumber) {
+  return sendMessage(to, {
+    type: "interactive", interactive: { type: "button", body: { text: `Що змінити для особи ${beneficiaryNumber}?` }, action: { buttons: [
+      { type: "reply", reply: { id: "edit_beneficiary_name", title: "ПІБ" } },
+      { type: "reply", reply: { id: "edit_beneficiary_phone", title: "Телефон" } },
+    ] } },
   });
 }
 

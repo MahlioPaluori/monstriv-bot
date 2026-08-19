@@ -180,3 +180,80 @@ export async function finalizeMilitaryRequestDocuments({ militaryUnitNumber, con
 
   return finalizedDocuments;
 }
+
+export async function finalizeIndividualMultiRequestDocuments({ applicantName, applicationId, beneficiaries }) {
+  if (typeof applicationId !== "string" || !APPLICATION_ID_PATTERN.test(applicationId)) throw new Error("Invalid application ID");
+  if (!Array.isArray(beneficiaries) || beneficiaries.length < 2) throw new Error("Multi request beneficiaries are invalid");
+
+  const applicantFolderName = requiredFolderName(applicantName, "Individual applicant name");
+  const applicantFolder = await getOrCreateApplicantFolder("individual", applicantFolderName);
+  const drive = getDrive();
+  const documentKeys = ["passport", "rnokpp", "military_id", "ubd"];
+  const finalizedBeneficiaries = [];
+
+  for (let beneficiaryIndex = 0; beneficiaryIndex < beneficiaries.length; beneficiaryIndex += 1) {
+    const beneficiary = beneficiaries[beneficiaryIndex];
+    const beneficiaryFolderName = requiredFolderName(beneficiary?.name, `Beneficiary ${beneficiaryIndex + 1} name`);
+    const beneficiaryFolder = await getOrCreateFolder(beneficiaryFolderName, applicantFolder.id);
+    const finalizedDocuments = {};
+
+    for (const documentKey of documentKeys) {
+      const documents = beneficiary?.documents?.[documentKey] || [];
+      if (!Array.isArray(documents)) throw new Error(`Beneficiary ${beneficiaryIndex + 1} ${documentKey} documents are invalid`);
+      finalizedDocuments[documentKey] = [];
+
+      for (let fileIndex = 0; fileIndex < documents.length; fileIndex += 1) {
+        const document = documents[fileIndex];
+        const fileId = document?.driveFileId;
+        if (typeof fileId !== "string" || !fileId) throw new Error(`Beneficiary ${beneficiaryIndex + 1} ${documentKey} file ${fileIndex + 1} has no Drive file ID`);
+
+        const currentResponse = await drive.files.get({
+          fileId,
+          fields: "id,name,parents,mimeType,webViewLink,trashed",
+          supportsAllDrives: true,
+        });
+        const current = currentResponse.data;
+        if (!current.id || current.trashed) throw new Error(`Beneficiary ${beneficiaryIndex + 1} ${documentKey} file ${fileIndex + 1} is missing or trashed`);
+
+        const metadataExtension = fileExtension(document.fileName);
+        const currentNameExtension = fileExtension(current.name);
+        const mimeExtension = fileExtension("", current.mimeType);
+        const extension = metadataExtension !== ".bin"
+          ? metadataExtension
+          : currentNameExtension !== ".bin"
+            ? currentNameExtension
+            : mimeExtension;
+        const desiredName = safeFileName(`${applicationId}_person${beneficiaryIndex + 1}_${documentKey}${fileIndex + 1}${extension}`);
+        const currentParents = Array.isArray(current.parents) ? current.parents.filter(Boolean) : [];
+        const hasTargetParent = currentParents.includes(beneficiaryFolder.id);
+        const parentsToRemove = currentParents.filter((parentId) => parentId !== beneficiaryFolder.id);
+        const nameNeedsUpdate = current.name !== desiredName;
+        const parentsNeedUpdate = !hasTargetParent || parentsToRemove.length > 0;
+        let finalized = current;
+
+        if (nameNeedsUpdate || parentsNeedUpdate) {
+          const updateResponse = await drive.files.update({
+            fileId,
+            addParents: hasTargetParent ? undefined : beneficiaryFolder.id,
+            removeParents: parentsToRemove.length ? parentsToRemove.join(",") : undefined,
+            requestBody: nameNeedsUpdate ? { name: desiredName } : {},
+            fields: "id,name,parents,mimeType,webViewLink,trashed",
+            supportsAllDrives: true,
+          });
+          finalized = updateResponse.data;
+        }
+
+        finalizedDocuments[documentKey].push({
+          ...document,
+          driveFileId: fileId,
+          fileName: finalized.name || desiredName,
+          driveUrl: finalized.webViewLink || current.webViewLink || document.driveUrl || `https://drive.google.com/file/d/${fileId}/view`,
+        });
+      }
+    }
+
+    finalizedBeneficiaries.push({ ...beneficiary, documents: finalizedDocuments });
+  }
+
+  return finalizedBeneficiaries;
+}
