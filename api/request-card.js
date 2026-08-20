@@ -64,11 +64,7 @@ function beneficiariesSection(request) {
   const beneficiaries = request.beneficiaries || [];
   const blocks = beneficiaries.map((beneficiary) => `
       <article class="beneficiary">
-        <h3>ОСОБА ${escapeHtml(beneficiary.index)}</h3>
-        <div class="beneficiary-identity">
-          <p><strong>ПІБ:</strong> <span>${displayValue(beneficiary.name)}</span></p>
-          <p><strong>Телефон:</strong> <span>${displayValue(beneficiary.phone)}</span></p>
-        </div>
+        <p class="beneficiary-summary"><strong class="beneficiary-number">ОСОБА ${escapeHtml(beneficiary.index)}</strong> · <strong>ПІБ:</strong> ${displayValue(beneficiary.name)} · <strong>Телефон:</strong> ${displayValue(beneficiary.phone)}</p>
         <p class="document-status">${beneficiaryDocumentStatus(beneficiary.documents)}</p>
       </article>`).join("");
 
@@ -121,12 +117,11 @@ function requestCardPage(request) {
     .multi-card .need-box { min-height: 0; }
     .need { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
     .beneficiaries-section { margin-top: 16px; }
-    .beneficiary { margin: 0 0 10px; padding: 9px 11px; border: 1px solid #999; break-inside: avoid; page-break-inside: avoid; }
-    .beneficiary h3 { margin: 0 0 7px; font-size: 10.5pt; letter-spacing: .04em; }
-    .beneficiary-identity { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 14px; margin-bottom: 8px; }
-    .beneficiary-identity p { margin: 0; overflow-wrap: anywhere; }
-    .beneficiary-identity strong { color: #444; }
-    .document-status { margin: 0; border-top: 1px solid #ccc; padding-top: 6px; overflow-wrap: anywhere; }
+    .beneficiary { margin: 0 0 7px; padding: 6px 9px; border: 1px solid #999; line-height: 1.35; break-inside: avoid; page-break-inside: avoid; }
+    .beneficiary-summary { margin: 0 0 4px; overflow-wrap: anywhere; }
+    .beneficiary-summary strong { color: #444; }
+    .beneficiary-number { font-size: 10.5pt; letter-spacing: .04em; }
+    .document-status { margin: 0; border-top: 1px solid #ccc; padding-top: 4px; overflow-wrap: anywhere; }
     .notes { margin-bottom: 14px; }
     .notes-box { border: 1px solid #a8a8a8; padding: 0 12px; }
     .note-line { height: 11mm; border-bottom: 1px solid #b6b6b6; }
