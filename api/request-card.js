@@ -47,6 +47,54 @@ function displayValue(value) {
   return escapeHtml(value || "—");
 }
 
+function safeHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function documentFiles(files) {
+  if (!Array.isArray(files) || !files.length) return '<span class="empty-value">—</span>';
+  return files.map((file) => {
+    const fileName = displayValue(file?.fileName);
+    const url = safeHttpUrl(file?.url);
+    return url
+      ? `<a class="document-file" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${fileName}</a>`
+      : `<span class="document-file">${fileName}</span>`;
+  }).join("");
+}
+
+function beneficiariesSection(request) {
+  if (request.type !== "individual" || request.multiPackage !== true) return "";
+  const documentLabels = [
+    ["passport", "Паспорт"],
+    ["rnokpp", "РНОКПП"],
+    ["military_id", "Військовий документ"],
+    ["ubd", "УБД"],
+  ];
+  const beneficiaries = request.beneficiaries || [];
+  const blocks = beneficiaries.map((beneficiary) => `
+      <article class="beneficiary">
+        <h3>ОСОБА ${escapeHtml(beneficiary.index)}</h3>
+        <div class="beneficiary-identity">
+          <p><strong>ПІБ:</strong> <span>${displayValue(beneficiary.name)}</span></p>
+          <p><strong>Телефон:</strong> <span>${displayValue(beneficiary.phone)}</span></p>
+        </div>
+        <div class="documents">
+          ${documentLabels.map(([key, label]) => `<div class="document-row"><strong>${label}</strong><div class="document-files">${documentFiles(beneficiary.documents?.[key])}</div></div>`).join("")}
+        </div>
+      </article>`).join("");
+
+  return `
+    <section class="section beneficiaries-section">
+      <h2>ОСОБИ ТА ДОКУМЕНТИ · ${beneficiaries.length}</h2>
+      ${blocks}
+    </section>`;
+}
+
 function errorPage(message) {
   return `<!doctype html>
 <html lang="uk"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Картка запиту</title></head>
@@ -54,9 +102,14 @@ function errorPage(message) {
 }
 
 function requestCardPage(request) {
+  const isMulti = request.type === "individual" && request.multiPackage === true;
   const militaryUnit = request.type === "military_unit"
     ? `<p class="unit"><strong>Військова частина:</strong> ${displayValue(request.militaryUnitNumber)}</p>`
     : "";
+  const multiApplicant = isMulti
+    ? `<p class="applicant-label">Заявник · ${displayValue(request.mainPhone)}</p><p class="package-count">Кілька пакетів документів · ${request.beneficiaries.length} осіб</p>`
+    : "";
+  const multiBeneficiaries = beneficiariesSection(request);
   return `<!doctype html>
 <html lang="uk">
 <head>
@@ -76,10 +129,26 @@ function requestCardPage(request) {
     .header .date { margin: 0; color: #555; font-size: 10pt; white-space: nowrap; }
     .header .name { margin: 8px 0 0; font-size: 14pt; font-weight: 700; line-height: 1.25; }
     .header .unit { margin: 5px 0 0; color: #333; font-size: 11pt; }
+    .header .applicant-label { margin: 3px 0 0; color: #444; font-size: 10.5pt; }
+    .header .package-count { margin: 4px 0 0; color: #666; font-size: 9.5pt; }
     .section { margin-bottom: 14px; }
     h2 { margin: 0 0 7px; color: #303030; font-size: 11.5pt; letter-spacing: .04em; }
     .need-box { border: 1px solid #a8a8a8; padding: 10px 12px; min-height: 48mm; }
+    .multi-card .need-box { min-height: 0; }
     .need { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .beneficiaries-section { margin-top: 16px; }
+    .beneficiary { margin: 0 0 10px; padding: 9px 11px; border: 1px solid #999; break-inside: avoid; page-break-inside: avoid; }
+    .beneficiary h3 { margin: 0 0 7px; font-size: 10.5pt; letter-spacing: .04em; }
+    .beneficiary-identity { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 14px; margin-bottom: 8px; }
+    .beneficiary-identity p { margin: 0; overflow-wrap: anywhere; }
+    .beneficiary-identity strong { color: #444; }
+    .documents { border-top: 1px solid #ccc; padding-top: 6px; }
+    .document-row { display: grid; grid-template-columns: 45mm 1fr; gap: 6px; margin: 4px 0; }
+    .document-row > strong { color: #444; font-size: 10pt; }
+    .document-files { display: flex; flex-wrap: wrap; gap: 3px 8px; min-width: 0; }
+    .document-file { color: inherit; overflow-wrap: anywhere; }
+    a.document-file { text-decoration: underline; text-underline-offset: 2px; }
+    .empty-value { color: #666; }
     .notes { margin-bottom: 14px; }
     .notes-box { border: 1px solid #a8a8a8; padding: 0 12px; }
     .note-line { height: 11mm; border-bottom: 1px solid #b6b6b6; }
@@ -96,19 +165,21 @@ function requestCardPage(request) {
 </head>
 <body>
   <div class="screen-actions"><button type="button" onclick="window.print()">Друкувати</button></div>
-  <main class="card">
+  <main class="card${isMulti ? " multi-card" : ""}">
     <header class="header">
       <div class="header-top">
         <h1>ЗАЯВКА № ${escapeHtml(request.applicationId)}</h1>
         <p class="date">Дата: ${displayValue(request.date)}</p>
       </div>
       <p class="name">${displayValue(request.personName)}</p>
+      ${multiApplicant}
       ${militaryUnit}
     </header>
     <section class="section need-section">
       <h2>ПОТРЕБА</h2>
       <div class="need-box"><p class="need">${displayValue(request.need)}</p></div>
     </section>
+    ${multiBeneficiaries}
     <section class="notes">
       <h2>КОМПЛЕКТАЦІЯ / ПРИМІТКИ</h2>
       <div class="notes-box"><div class="note-line"></div><div class="note-line"></div><div class="note-line"></div><div class="note-line"></div><div class="note-line"></div></div>

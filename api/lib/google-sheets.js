@@ -183,6 +183,82 @@ function normalizeRequestRow(type, row) {
   };
 }
 
+function cellText(cell) {
+  return String(valueOrEmpty(cell?.formattedValue ?? cell?.userEnteredValue?.stringValue));
+}
+
+function documentLinkAt(textFormatRuns, startIndex) {
+  let activeFormat = {};
+  for (const run of textFormatRuns || []) {
+    if (!Number.isInteger(run?.startIndex) || run.startIndex > startIndex) break;
+    activeFormat = run.format || {};
+  }
+  return activeFormat?.link?.uri || "";
+}
+
+function normalizeDocumentCell(cell) {
+  const text = cellText(cell);
+  if (!text) return [];
+
+  const files = [];
+  let startIndex = 0;
+  for (const line of text.split("\n")) {
+    const fileName = line.trim();
+    if (fileName) {
+      files.push({
+        fileName,
+        url: documentLinkAt(cell?.textFormatRuns, startIndex),
+      });
+    }
+    startIndex += line.length + 1;
+  }
+  return files;
+}
+
+async function readIndividualMultiBeneficiaries(sheetsApi, match) {
+  const response = await sheetsApi.spreadsheets.get({
+    spreadsheetId: match.spreadsheetId,
+    ranges: [sheetRange(match.title, `A${match.rowNumber + 1}:O`)],
+    includeGridData: true,
+    fields: "sheets(data(rowData(values(userEnteredValue,formattedValue,textFormatRuns))))",
+  });
+  const rows = response.data.sheets?.[0]?.data?.[0]?.rowData || [];
+  const beneficiaries = [];
+
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const cells = rows[rowIndex]?.values || [];
+    const label = cellText(cells[1]);
+    const expectedLabel = `Особа ${beneficiaries.length + 1}`;
+
+    if (label !== expectedLabel) {
+      if (/^Особа \d+$/.test(label)) return { result: "invalid_data" };
+      break;
+    }
+
+    const beneficiary = {
+      index: beneficiaries.length + 1,
+      name: cellText(cells[4]).trim(),
+      phone: cellText(cells[5]).trim(),
+      documents: {
+        passport: normalizeDocumentCell(cells[6]),
+        rnokpp: normalizeDocumentCell(cells[7]),
+        military_id: normalizeDocumentCell(cells[8]),
+        ubd: normalizeDocumentCell(cells[9]),
+      },
+    };
+    if (!beneficiary.name || !beneficiary.phone
+      || !beneficiary.documents.passport.length
+      || !beneficiary.documents.rnokpp.length
+      || !beneficiary.documents.military_id.length) {
+      return { result: "invalid_data" };
+    }
+    beneficiaries.push(beneficiary);
+  }
+
+  if (beneficiaries.length === 1) return { result: "invalid_data" };
+  return beneficiaries.length ? { result: "found", beneficiaries } : { result: "single" };
+}
+
 export async function findRequestByApplicationId(applicationId) {
   const spreadsheets = await findMonthlySpreadsheetsForApplicationId(applicationId);
   const sheetsApi = getSheets();
@@ -203,6 +279,14 @@ export async function findRequestByApplicationId(applicationId) {
   });
   const request = normalizeRequestRow(match.type, rowResponse.data.values?.[0] || []);
   if (!request || request.applicationId !== applicationId) return { result: "invalid_data" };
+  if (match.type === "individual") {
+    const multi = await readIndividualMultiBeneficiaries(sheetsApi, match);
+    if (multi.result === "invalid_data") return multi;
+    if (multi.result === "found") {
+      request.multiPackage = true;
+      request.beneficiaries = multi.beneficiaries;
+    }
+  }
   return { result: "found", request };
 }
 
