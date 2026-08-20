@@ -47,34 +47,20 @@ function displayValue(value) {
   return escapeHtml(value || "—");
 }
 
-function safeHttpUrl(value) {
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : "";
-  } catch {
-    return "";
-  }
-}
-
-function documentFiles(files) {
-  if (!Array.isArray(files) || !files.length) return '<span class="empty-value">—</span>';
-  return files.map((file) => {
-    const fileName = displayValue(file?.fileName);
-    const url = safeHttpUrl(file?.url);
-    return url
-      ? `<a class="document-file" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${fileName}</a>`
-      : `<span class="document-file">${fileName}</span>`;
-  }).join("");
+function beneficiaryDocumentStatus(documents) {
+  const labels = [
+    ["passport", "Паспорт"],
+    ["rnokpp", "РНОКПП"],
+    ["military_id", "Військовий квиток"],
+    ["ubd", "УБД"],
+  ];
+  return labels
+    .map(([key, label]) => `${label} ${Array.isArray(documents?.[key]) && documents[key].length > 0 ? "✓" : "×"}`)
+    .join(", ");
 }
 
 function beneficiariesSection(request) {
   if (request.type !== "individual" || request.multiPackage !== true) return "";
-  const documentLabels = [
-    ["passport", "Паспорт"],
-    ["rnokpp", "РНОКПП"],
-    ["military_id", "Військовий документ"],
-    ["ubd", "УБД"],
-  ];
   const beneficiaries = request.beneficiaries || [];
   const blocks = beneficiaries.map((beneficiary) => `
       <article class="beneficiary">
@@ -83,9 +69,7 @@ function beneficiariesSection(request) {
           <p><strong>ПІБ:</strong> <span>${displayValue(beneficiary.name)}</span></p>
           <p><strong>Телефон:</strong> <span>${displayValue(beneficiary.phone)}</span></p>
         </div>
-        <div class="documents">
-          ${documentLabels.map(([key, label]) => `<div class="document-row"><strong>${label}</strong><div class="document-files">${documentFiles(beneficiary.documents?.[key])}</div></div>`).join("")}
-        </div>
+        <p class="document-status">${beneficiaryDocumentStatus(beneficiary.documents)}</p>
       </article>`).join("");
 
   return `
@@ -142,13 +126,7 @@ function requestCardPage(request) {
     .beneficiary-identity { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 14px; margin-bottom: 8px; }
     .beneficiary-identity p { margin: 0; overflow-wrap: anywhere; }
     .beneficiary-identity strong { color: #444; }
-    .documents { border-top: 1px solid #ccc; padding-top: 6px; }
-    .document-row { display: grid; grid-template-columns: 45mm 1fr; gap: 6px; margin: 4px 0; }
-    .document-row > strong { color: #444; font-size: 10pt; }
-    .document-files { display: flex; flex-wrap: wrap; gap: 3px 8px; min-width: 0; }
-    .document-file { color: inherit; overflow-wrap: anywhere; }
-    a.document-file { text-decoration: underline; text-underline-offset: 2px; }
-    .empty-value { color: #666; }
+    .document-status { margin: 0; border-top: 1px solid #ccc; padding-top: 6px; overflow-wrap: anywhere; }
     .notes { margin-bottom: 14px; }
     .notes-box { border: 1px solid #a8a8a8; padding: 0 12px; }
     .note-line { height: 11mm; border-bottom: 1px solid #b6b6b6; }
