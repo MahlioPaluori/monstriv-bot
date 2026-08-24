@@ -365,6 +365,20 @@ Lookup read-only, не викликає `getOrCreateCurrentMonthSpreadsheet()`, 
 
 Onboarding production number ще **не завершений**. Цільова модель — WhatsApp Business App + Cloud API Coexistence через official Embedded Signup / WhatsApp Business App onboarding, щоб бот працював через Cloud API, оператор — через WhatsApp Business або supported linked client, а messaging history mirror-илась.
 
+### Meta Embedded Signup callback
+
+**IMPLEMENTED:** `GET /api/meta/oauth-callback` — окремий Vercel endpoint для Meta-hosted Embedded Signup OAuth callback. Він отримує query-параметри `code`, `error` і `error_description`:
+
+- за наявності `error` повертає HTML-відповідь 400 і пише діагностичний запис без code;
+- без `code` повертає HTML-відповідь 400;
+- з `code` підтверджує успішне отримання HTML-відповіддю 200 і логує лише `hasCode: true`.
+
+Endpoint наразі **не** обмінює authorization code на token, не зберігає code, не читає Google/Redis та не змінює WhatsApp webhook/state machine. Подальше використання code потребує окремої погодженої задачі.
+
+### Vercel Hobby serverless limit
+
+Vercel Hobby має ліміт 12 Serverless Functions на deployment. Після видалення застарілих одноразових production-test routes `api/drive-test.js` і `api/drive-upload-test.js` у `main` залишилось 11 JavaScript-файлів під `api/`. Видалені routes перевіряли Drive root та створювали `_TEST_MONSTRIV_BOT/drive-test.txt`; production Drive upload вже підтверджений реальними WhatsApp-документами. Не відновлювати ці endpoints без окремої потреби й перевірки function budget.
+
 Meta app: `Monstriv Request`. Tech Provider path активований.
 
 Поточний blocker: старий Business Portfolio `BikePride Extreme` не має завершених Business Verification та App Review і не планується як production owner. Правильна business entity — БФ «Корпорація Монстрів». Очікується admin/business access до Meta/Facebook assets фонду.
@@ -421,7 +435,7 @@ Operator handoff залишається high priority, але залежить �
 Актуальний HEAD на момент оновлення документації:
 
 ```text
-5434e56 Fix multi-package Drive folder routing
+a52d18c Remove obsolete Vercel test endpoints
 ```
 
-Ключові milestones після попереднього documentation sync `3ef4f46`: повний individual multi-package WhatsApp/state flow, Drive finalization і Sheets master/detail persistence (`8988c99`), а також nested multi collection routing із conservative empty-parent cleanup (`5434e56`). Earlier milestones: military contact profile (`33d809e`), clickable request-card IDs (`4d0797d`), first-contact UX (`75ac3e9`) і military Drive/Sheets finalization (`a29690f`).
+Ключові milestones після попереднього documentation sync `3ef4f46`: повний individual multi-package WhatsApp/state flow, Drive finalization і Sheets master/detail persistence (`8988c99`), nested multi collection routing із conservative empty-parent cleanup (`5434e56`), printable multi request card (`7618c88`), Meta Embedded Signup OAuth callback (`b2c7299`) та cleanup obsolete Drive test endpoints для Vercel Hobby function limit (`a52d18c`). Earlier milestones: military contact profile (`33d809e`), clickable request-card IDs (`4d0797d`), first-contact UX (`75ac3e9`) і military Drive/Sheets finalization (`a29690f`).

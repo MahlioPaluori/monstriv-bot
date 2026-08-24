@@ -24,8 +24,13 @@ local VS Code → checks → commit → push main → Vercel deployment
 - `api/request-card.js` — HMAC-захищена printable HTML-картка запиту.
 - `api/request-card-test-url.js` — тимчасовий, наразі збережений для тестування endpoint генерації signed request-card URL.
 - `api/request-card-links-test.js` — тимчасовий, наразі збережений для тестування endpoint міграції clickable request IDs у current monthly spreadsheet.
+- `api/meta/oauth-callback.js` — callback Meta-hosted Embedded Signup OAuth: приймає `code` або повідомляє про OAuth error; не обмінює code на токени й не змінює bot state.
 
 Основні інтеграції: WhatsApp Cloud API, Redis, Google Drive API, Google Sheets API, Vercel і GitHub. State не можна тримати лише в пам'яті процесу: Vercel виконує незалежні serverless-запити.
+
+### Vercel Hobby function limit
+
+Vercel Hobby дозволяє не більше 12 Serverless Functions у deployment. Станом на `a52d18c` під `api/` є 11 JavaScript-файлів, які потрібно враховувати при додаванні endpoint або helper-файлу. Не відновлювати застарілі `api/drive-test.js` або `api/drive-upload-test.js`: це були одноразові тестові routes, уже видалені після production-перевірки Google Drive.
 
 ## Правила внесення змін
 
@@ -66,6 +71,8 @@ Military та individual profiles мають окремі Redis keys і не п�
 У Sheets visible значення колонки B залишається exact `applicationId`, але є clickable signed request-card link. Не дублювати signing logic поза `buildRequestCardUrl()`.
 
 `api/request-card-test-url.js` і `api/request-card-links-test.js` — temporary endpoints, currently retained for testing; не видаляти випадково. Поточну роботу над production WhatsApp Business App + Cloud API Coexistence не змінювати без окремого запиту: onboarding ще не завершений.
+
+`api/meta/oauth-callback.js` потрібен для Meta-hosted Embedded Signup. Не додавати до нього token exchange, збереження OAuth code або зміну WhatsApp/webhook flow без окремо погодженої задачі.
 
 ## Secrets та environment variables
 
