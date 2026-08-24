@@ -11,10 +11,10 @@ import {
   saveApplicantProfile,
   saveMilitaryContactProfile,
   saveUserState,
-} from "./lib/state.js";
-import { downloadWhatsAppMedia } from "./lib/meta-media.js";
-import { finalizeIndividualMultiRequestDocuments, finalizeMilitaryRequestDocuments, getOrCreateApplicantFolder, getOrCreateIndividualMultiBeneficiaryFolder, uploadBufferToDrive } from "./lib/google-drive.js";
-import { appendConfirmedMultiRequest, appendConfirmedRequest, updateMilitaryRequestDocumentLinks } from "./lib/google-sheets.js";
+} from "../lib/state.js";
+import { downloadWhatsAppMedia } from "../lib/meta-media.js";
+import { finalizeIndividualMultiRequestDocuments, finalizeMilitaryRequestDocuments, getOrCreateApplicantFolder, getOrCreateIndividualMultiBeneficiaryFolder, uploadBufferToDrive } from "../lib/google-drive.js";
+import { appendConfirmedMultiRequest, appendConfirmedRequest, updateMilitaryRequestDocumentLinks } from "../lib/google-sheets.js";
 import {
   sendApplicationAccepted,
   sendApplicantTypeMenu,
@@ -27,7 +27,7 @@ import {
   sendReturningApplicantMenu,
   sendText,
   sendYesNoMenu,
-} from "./lib/whatsapp.js";
+} from "../lib/whatsapp.js";
 
 const PHYSICAL_DOCUMENTS = [
   { key: "passport", label: "📕 Паспорт" },

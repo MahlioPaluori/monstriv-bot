@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { findRequestByApplicationId } from "./lib/google-sheets.js";
+import { findRequestByApplicationId } from "../lib/google-sheets.js";
 
 const APPLICATION_ID_PATTERN = /^\d{4}-\d{6,}$/;
 const SIGNATURE_PATTERN = /^[a-f0-9]{64}$/i;

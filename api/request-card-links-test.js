@@ -1,5 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
-import { ensureRequestCardLinks } from "./lib/google-sheets.js";
+import { ensureRequestCardLinks } from "../lib/google-sheets.js";
 
 function sendJson(res, status, payload) {
   res.setHeader("Cache-Control", "private, no-store");

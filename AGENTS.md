@@ -15,14 +15,12 @@ local VS Code → checks → commit → push main → Vercel deployment
 ## Архітектура
 
 - `api/webhook.js` — Vercel webhook, Meta verification, WhatsApp state machine, документи, delivery і confirmation.
-- `api/lib/whatsapp.js` — WhatsApp Cloud API `v26.0`, текстові та інтерактивні повідомлення.
-- `api/lib/state.js` — Redis state, незалежні профілі фізосіб і відповідальних осіб ВЧ, counters та idempotency claims.
-- `api/lib/meta-media.js` — завантаження WhatsApp media у `Buffer`.
-- `api/lib/google-drive.js` — OAuth2 Google Drive, папки, document uploads і post-confirm finalization документів ВЧ та multi-заявок фізосіб.
-- `api/lib/google-sheets.js` — monthly operator spreadsheets, single rows, multi master/detail blocks, statuses, clickable request IDs, rich-text document links і request-card lookup.
-- `api/sheets-test.js` — безпечна діагностика current monthly spreadsheet.
+- `lib/whatsapp.js` — WhatsApp Cloud API `v26.0`, текстові та інтерактивні повідомлення.
+- `lib/state.js` — Redis state, незалежні профілі фізосіб і відповідальних осіб ВЧ, counters та idempotency claims.
+- `lib/meta-media.js` — завантаження WhatsApp media у `Buffer`.
+- `lib/google-drive.js` — OAuth2 Google Drive, папки, document uploads і post-confirm finalization документів ВЧ та multi-заявок фізосіб.
+- `lib/google-sheets.js` — monthly operator spreadsheets, single rows, multi master/detail blocks, statuses, clickable request IDs, rich-text document links і request-card lookup.
 - `api/request-card.js` — HMAC-захищена printable HTML-картка запиту.
-- `api/request-card-test-url.js` — тимчасовий, наразі збережений для тестування endpoint генерації signed request-card URL.
 - `api/request-card-links-test.js` — тимчасовий, наразі збережений для тестування endpoint міграції clickable request IDs у current monthly spreadsheet.
 - `api/meta/oauth-callback.js` — callback Meta-hosted Embedded Signup OAuth: приймає `code` або повідомляє про OAuth error; не обмінює code на токени й не змінює bot state.
 
@@ -30,7 +28,7 @@ local VS Code → checks → commit → push main → Vercel deployment
 
 ### Vercel Hobby function limit
 
-Vercel Hobby дозволяє не більше 12 Serverless Functions у deployment. Станом на `a52d18c` під `api/` є 11 JavaScript-файлів, які потрібно враховувати при додаванні endpoint або helper-файлу. Не відновлювати застарілі `api/drive-test.js` або `api/drive-upload-test.js`: це були одноразові тестові routes, уже видалені після production-перевірки Google Drive.
+Vercel Hobby дозволяє не більше 12 Serverless Functions у deployment. Production helpers зберігаються в кореневому `lib/`, а не в `api/`, щоб не витрачати function budget. У `api/` залишаються лише HTTP endpoint-файли; перед додаванням нового endpoint перевіряти їх кількість. Не відновлювати застарілі `api/drive-test.js`, `api/drive-upload-test.js`, `api/sheets-test.js` або `api/request-card-test-url.js`: це були одноразові тестові routes, уже видалені після production-перевірок.
 
 ## Правила внесення змін
 
@@ -70,7 +68,7 @@ Military та individual profiles мають окремі Redis keys і не п�
 
 У Sheets visible значення колонки B залишається exact `applicationId`, але є clickable signed request-card link. Не дублювати signing logic поза `buildRequestCardUrl()`.
 
-`api/request-card-test-url.js` і `api/request-card-links-test.js` — temporary endpoints, currently retained for testing; не видаляти випадково. Поточну роботу над production WhatsApp Business App + Cloud API Coexistence не змінювати без окремого запиту: onboarding ще не завершений.
+`api/request-card-links-test.js` — temporary repair endpoint, currently retained для відновлення clickable request-card links у вже існуючих Sheets rows; не видаляти випадково. Поточну роботу над production WhatsApp Business App + Cloud API Coexistence не змінювати без окремого запиту: onboarding ще не завершений.
 
 `api/meta/oauth-callback.js` потрібен для Meta-hosted Embedded Signup. Не додавати до нього token exchange, збереження OAuth code або зміну WhatsApp/webhook flow без окремо погодженої задачі.
 

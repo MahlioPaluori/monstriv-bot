@@ -345,13 +345,6 @@ Lookup read-only, не викликає `getOrCreateCurrentMonthSpreadsheet()`, 
 
 ## TEMPORARY / CURRENTLY RETAINED FOR TESTING
 
-`GET /api/request-card-test-url?id=<APPLICATION_ID>&token=<TEST_SECRET>` існує у `main`.
-
-- перевіряє `REQUEST_CARD_TEST_SECRET` через `timingSafeEqual`;
-- генерує signed request-card URL;
-- не читає Sheets і не перевіряє існування заявки;
-- не змінює дані.
-
 `GET /api/request-card-links-test?token=<TEST_SECRET>`:
 
 - захищений тим самим `REQUEST_CARD_TEST_SECRET` через `timingSafeEqual`;
@@ -359,7 +352,7 @@ Lookup read-only, не викликає `getOrCreateCurrentMonthSpreadsheet()`, 
 - пропускає вже правильні links і не змінює заявки чи інші колонки;
 - повертає лише лічильники `updated`, `alreadyCorrect`, `skipped`, без IDs, персональних даних або signed URLs.
 
-Обидва endpoints наразі свідомо залишаються для ширшого періоду тестування. Cleanup буде окремим пізнішим рішенням; `REQUEST_CARD_TEST_SECRET` залишається актуальним environment variable.
+Цей endpoint наразі свідомо залишається як repair route для ширшого періоду тестування. Його cleanup буде окремим пізнішим рішенням; `REQUEST_CARD_TEST_SECRET` залишається актуальним environment variable.
 
 ## CURRENT INFRASTRUCTURE: production WhatsApp / Coexistence
 
@@ -377,7 +370,7 @@ Endpoint наразі **не** обмінює authorization code на token, н�
 
 ### Vercel Hobby serverless limit
 
-Vercel Hobby має ліміт 12 Serverless Functions на deployment. Після видалення застарілих одноразових production-test routes `api/drive-test.js` і `api/drive-upload-test.js` у `main` залишилось 11 JavaScript-файлів під `api/`. Видалені routes перевіряли Drive root та створювали `_TEST_MONSTRIV_BOT/drive-test.txt`; production Drive upload вже підтверджений реальними WhatsApp-документами. Не відновлювати ці endpoints без окремої потреби й перевірки function budget.
+Vercel Hobby має ліміт 12 Serverless Functions на deployment. Застарілі одноразові production-test routes `api/drive-test.js`, `api/drive-upload-test.js`, `api/sheets-test.js` і `api/request-card-test-url.js` видалені. Production helpers винесені з `api/lib/` у кореневий `lib/`, тому під `api/` залишаються лише HTTP endpoint-файли. Видалені Drive routes перевіряли Drive root та створювали `_TEST_MONSTRIV_BOT/drive-test.txt`; production Drive upload уже підтверджений реальними WhatsApp-документами. Не відновлювати ці endpoints без окремої потреби й перевірки function budget.
 
 Meta app: `Monstriv Request`. Tech Provider path активований.
 
