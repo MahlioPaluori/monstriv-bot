@@ -8,6 +8,7 @@ import {
   getApplicantProfile,
   getMilitaryContactProfile,
   getUserState,
+  getKyivApplicationPeriod,
   nextDocumentSequence,
   ownsConfirmationClaim,
   releaseConfirmationClaim,
@@ -20,7 +21,7 @@ import {
 } from "../lib/state.js";
 import { downloadWhatsAppMedia } from "../lib/meta-media.js";
 import { createCanonicalApplicantDocumentCopies, finalizeIndividualMultiRequestDocuments, finalizeMilitaryRequestDocuments, getOrCreateApplicantFolder, getOrCreateIndividualMultiBeneficiaryFolder, uploadBufferToDrive } from "../lib/google-drive.js";
-import { appendConfirmedMultiRequest, appendConfirmedRequest, findRequestByApplicationId, updateMilitaryRequestDocumentLinks } from "../lib/google-sheets.js";
+import { appendConfirmedMultiRequest, appendConfirmedRequest, findRequestByApplicationId, getMaxApplicationSequenceForPeriod, updateMilitaryRequestDocumentLinks } from "../lib/google-sheets.js";
 import {
   sendActiveRequestNavigation,
   sendApplicationAccepted,
@@ -358,9 +359,19 @@ export async function repeatCurrentPrompt(from, state, services = {}) {
   }
   return sendText(from, "Продовжуйте заповнення заявки з поточного кроку.");
 }
+async function allocateNextApplicationId(assertClaimOwnership) {
+  const period = getKyivApplicationPeriod();
+  await assertClaimOwnership();
+  const recordedMaximum = await getMaxApplicationSequenceForPeriod(period);
+  await assertClaimOwnership();
+  const applicationId = await createApplicationNumber(period, recordedMaximum);
+  await assertClaimOwnership();
+  return applicationId;
+}
+
 export async function confirmRequest(from, state, assertClaimOwnership, services = {}) {
   const operations = {
-    nextApplicationId: createApplicationNumber,
+    nextApplicationId: allocateNextApplicationId,
     persistState: saveUserState,
     finalizeMultiDocuments: finalizeIndividualMultiRequestDocuments,
     appendMultiRequest: appendConfirmedMultiRequest,
@@ -378,7 +389,7 @@ export async function confirmRequest(from, state, assertClaimOwnership, services
   await assertClaimOwnership();
   let persistedConfirmationData = false;
   if (!request.applicationId) {
-    request.applicationId = await operations.nextApplicationId();
+    request.applicationId = await operations.nextApplicationId(assertClaimOwnership);
     await assertClaimOwnership();
     persistedConfirmationData = true;
   }

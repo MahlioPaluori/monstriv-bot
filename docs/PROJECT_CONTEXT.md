@@ -160,12 +160,12 @@ Redis (`REDIS_URL`) зберігає:
 - `wa:user:<phone>` — розмовний state, TTL 7 днів;
 - `wa:profile:<phone>` — persistent profile фізособи без TTL;
 - `wa:military-contact:<phone>` — незалежний persistent profile відповідальної особи ВЧ без TTL (`phone`, canonical `name`, `createdAt`, `updatedAt`); номер ВЧ не зберігається;
-- `requests:counter:<UTC-рік>` — лічильник заявок;
+- `requests:counter:<YYYY-MM>` — місячний лічильник заявок за `Europe/Kyiv`;
 - `wa:media:<phone>:<mediaId>` — media upload claim на 10 хвилин;
 - `wa:doc-ack:<phone>:<documentLabel>` — single claim кнопки «Готово»; multi semantic scope — `multi:<beneficiaryIndex>:<documentKey>` під тим самим reset-compatible prefix;
 - `wa:doc-seq:<phone>:<documentKey>` — single атомарна нумерація; multi scope — `multi:<beneficiaryIndex>:<documentKey>`.
 
-`applicationId` має формат `YYYY-NNNNNN`, наприклад `2026-000001`. Рік береться за UTC, а порядкова частина має щонайменше шість цифр.
+`applicationId` має формат `YYYY-MM-NNNN`, наприклад `2026-10-0001`. Період `YYYY-MM` фіксується один раз за часовим поясом `Europe/Kyiv` при первинній генерації, а послідовність `0001`–`9999` починається заново кожного місяця. Redis атомарно виділяє номер у `requests:counter:YYYY-MM`, враховуючи максимальний sequence, уже записаний у всіх однойменних місячних Google Sheets. Тому після втрати counter наступний номер продовжується після Sheets maximum; retry використовує стабільний `applicationId` зі state.
 
 Під час confirmation request state містить `applicationId`, `confirmedAt` (повний ISO timestamp) і `sheetsRecorded`. У Sheets `confirmedAt` відображається як `DD.MM.YYYY` у timezone `Europe/Kyiv`.
 
@@ -218,7 +218,7 @@ Recipient не впливає на hierarchy; `applicationId` не є folder lev
 <applicationId>_person<1-based-index>_<docKey><fileIndex>.<ext>
 ```
 
-Наприклад `2026-000123_person1_passport1.jpg` або `2026-000123_person2_rnokpp1.pdf`. `applicationId` є в кожному final filename, а `driveFileId` не змінюється. Actual old parent після move може бути прибраний лише якщо він порожній і не є `ФІЗ`/final applicant/final beneficiary folder; cleanup best-effort і не блокує успішну заявку. Global cleanup legacy folders не виконується.
+Наприклад `2026-10-0123_person1_passport1.jpg` або `2026-10-0123_person2_rnokpp1.pdf`. `applicationId` є в кожному final filename, а `driveFileId` не змінюється. Actual old parent після move може бути прибраний лише якщо він порожній і не є `ФІЗ`/final applicant/final beneficiary folder; cleanup best-effort і не блокує успішну заявку. Global cleanup legacy folders не виконується.
 
 ## IMPLEMENTED: Google Sheets
 
@@ -279,7 +279,7 @@ passport2.jpg
 
 Кожне filename є окремим clickable rich-text hyperlink на відповідний Drive file. Це працює і для одного, і для кількох файлів.
 
-Visible text у колонці B залишається exact `applicationId`, наприклад `2026-000001`, і автоматично стає clickable hyperlink на signed HTML request card. URL будується існуючим `buildRequestCardUrl()` із canonical production URL; raw URL та окрема колонка «Картка» не показуються.
+Visible text у колонці B залишається exact `applicationId`, наприклад `2026-10-0001`, і автоматично стає clickable hyperlink на signed HTML request card. URL будується існуючим `buildRequestCardUrl()` із canonical production URL; raw URL та окрема колонка «Картка» не показуються.
 
 ### Individual multi master/detail
 

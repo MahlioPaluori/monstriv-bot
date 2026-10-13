@@ -4,12 +4,15 @@ import test from "node:test";
 import {
   acquireConfirmationClaim,
   buildApplicantProfile,
+  createApplicationNumber,
+  getKyivApplicationPeriod,
   ownsConfirmationClaim,
   releaseConfirmationClaim,
   renewConfirmationClaim,
 } from "../lib/state.js";
 import { createCanonicalApplicantDocumentCopies, materializeReusedApplicantDocument } from "../lib/google-drive.js";
 import { confirmRequest, repeatCurrentPrompt, runClaimedConfirmation } from "../api/webhook.js";
+import { buildRequestCardUrl } from "../api/request-card.js";
 
 class FakeRedis {
   constructor() { this.values = new Map(); }
@@ -20,11 +23,63 @@ class FakeRedis {
   }
   async eval(script, { keys, arguments: args }) {
     const [key] = keys;
+    if (script.includes("local recorded")) {
+      const current = Number(this.values.get(key) || 0);
+      const recorded = Number(args[0]);
+      const next = Math.max(current, recorded) + 1;
+      if (next > Number(args[1])) return -1;
+      this.values.set(key, String(next));
+      return next;
+    }
     if (this.values.get(key) !== args[0]) return 0;
     if (script.includes('redis.call("DEL"')) this.values.delete(key);
     return 1;
   }
 }
+
+test("Kyiv application period follows the local month across UTC boundaries", () => {
+  assert.equal(getKyivApplicationPeriod(new Date("2026-09-30T20:59:59.000Z")), "2026-09");
+  assert.equal(getKyivApplicationPeriod(new Date("2026-09-30T21:00:00.000Z")), "2026-10");
+  assert.equal(getKyivApplicationPeriod(new Date("2026-12-31T22:00:00.000Z")), "2027-01");
+});
+
+test("monthly application allocation starts at one and is isolated by Kyiv period", async () => {
+  const redis = new FakeRedis();
+  assert.equal(await createApplicationNumber("2026-10", 0, { redis }), "2026-10-0001");
+  assert.equal(await createApplicationNumber("2026-10", 0, { redis }), "2026-10-0002");
+  assert.equal(await createApplicationNumber("2026-11", 0, { redis }), "2026-11-0001");
+});
+
+test("monthly allocation recovers above Sheets maximum after Redis counter loss", async () => {
+  const redis = new FakeRedis();
+  assert.equal(await createApplicationNumber("2026-10", 17, { redis }), "2026-10-0018");
+  redis.values.clear();
+  assert.equal(await createApplicationNumber("2026-10", 18, { redis }), "2026-10-0019");
+});
+
+test("concurrent monthly allocations are unique and overflow is explicit", async () => {
+  const redis = new FakeRedis();
+  const allocated = await Promise.all([
+    createApplicationNumber("2026-10", 20, { redis }),
+    createApplicationNumber("2026-10", 20, { redis }),
+  ]);
+  assert.deepEqual(new Set(allocated), new Set(["2026-10-0021", "2026-10-0022"]));
+  await assert.rejects(createApplicationNumber("2026-10", 9999, { redis }), /limit reached/);
+});
+
+test("request-card signing accepts the new format and rejects the legacy format", () => {
+  const previous = process.env.REQUEST_CARD_SIGNING_SECRET;
+  process.env.REQUEST_CARD_SIGNING_SECRET = "local-test-secret";
+  try {
+    const url = new URL(buildRequestCardUrl("2026-10-0001", "https://example.test"));
+    assert.equal(url.searchParams.get("id"), "2026-10-0001");
+    assert.match(url.searchParams.get("sig"), /^[a-f0-9]{64}$/);
+    assert.throws(() => buildRequestCardUrl("2026-000001", "https://example.test"), /Invalid application ID/);
+  } finally {
+    if (previous === undefined) delete process.env.REQUEST_CARD_SIGNING_SECRET;
+    else process.env.REQUEST_CARD_SIGNING_SECRET = previous;
+  }
+});
 
 test("confirmation claim serializes concurrent callbacks and only its owner can release it", async () => {
   const redis = new FakeRedis();
@@ -96,12 +151,12 @@ test("retry after application ID persistence reuses state, and completed callbac
   let attempts = 0;
   const performConfirmation = async (_phone, current) => {
     attempts += 1;
-    current.request.applicationId ||= "2026-000009";
+    current.request.applicationId ||= "2026-10-0009";
     if (attempts === 1) throw new Error("simulated failure after application ID");
     current.stage = "MAIN_MENU";
   };
   assert.deepEqual(await runClaimedConfirmation("380000000005", { ...harness, performConfirmation, handleFailure: async () => ({ failed: true }), ownerToken: "owner-a" }), { failed: true });
-  assert.equal(state.request.applicationId, "2026-000009");
+  assert.equal(state.request.applicationId, "2026-10-0009");
   assert.deepEqual(await runClaimedConfirmation("380000000005", { ...harness, performConfirmation, ownerToken: "owner-b" }), { completed: true });
   assert.equal(attempts, 2);
   assert.deepEqual(await runClaimedConfirmation("380000000005", { ...harness, performConfirmation, ownerToken: "owner-c" }), { stale: true });
@@ -185,7 +240,7 @@ test("partial Drive-copy retry reuses the marked copy and never mutates its sour
   const drive = driveMock();
   const args = {
     drive,
-    applicationId: "2026-000001",
+    applicationId: "2026-10-0001",
     beneficiaryIndex: 0,
     documentKey: "passport",
     fileIndex: 0,
@@ -201,9 +256,9 @@ test("partial Drive-copy retry reuses the marked copy and never mutates its sour
 });
 
 test("multiple valid Drive copies select the lowest file ID without creating or deleting files", async () => {
-  const marker = "2026-000001:person1:passport:1:canonical-source";
+  const marker = "2026-10-0001:person1:passport:1:canonical-source";
   const common = {
-    name: "2026-000001_person1_passport1.jpg",
+    name: "2026-10-0001_person1_passport1.jpg",
     parents: ["beneficiary-folder"],
     mimeType: "image/jpeg",
     trashed: false,
@@ -215,7 +270,7 @@ test("multiple valid Drive copies select the lowest file ID without creating or 
   ]);
   const result = await materializeReusedApplicantDocument({
     drive,
-    applicationId: "2026-000001",
+    applicationId: "2026-10-0001",
     beneficiaryIndex: 0,
     documentKey: "passport",
     fileIndex: 0,
@@ -228,10 +283,10 @@ test("multiple valid Drive copies select the lowest file ID without creating or 
 
 test("canonical applicant copies are stable across retry and leave application files unchanged", async () => {
   const drive = driveMock();
-  const source = { driveFileId: "application-file", fileName: "2026-000010_person1_passport1.jpg", driveUrl: "https://drive.test/application-file" };
+  const source = { driveFileId: "application-file", fileName: "2026-10-0010_person1_passport1.jpg", driveUrl: "https://drive.test/application-file" };
   const args = {
     applicantName: "Applicant",
-    applicationId: "2026-000010",
+    applicationId: "2026-10-0010",
     documents: { passport: [source] },
     drive,
     profileFolder: { id: "profile-folder" },
@@ -247,7 +302,7 @@ test("canonical applicant copies are stable across retry and leave application f
 test("lease loss during Drive copy prevents metadata mutation and further Drive side effects", async () => {
   let ownsLease = true;
   let updates = 0;
-  const marker = "2026-000011:person1:passport:1:canonical-source";
+  const marker = "2026-10-0011:person1:passport:1:canonical-source";
   const drive = {
     files: {
       list: async () => ({ data: { files: [] } }),
@@ -261,7 +316,7 @@ test("lease loss during Drive copy prevents metadata mutation and further Drive 
   };
   await assert.rejects(materializeReusedApplicantDocument({
     drive,
-    applicationId: "2026-000011",
+    applicationId: "2026-10-0011",
     beneficiaryIndex: 0,
     documentKey: "passport",
     fileIndex: 0,
@@ -298,7 +353,7 @@ function multiConfirmationState() {
 
 function confirmationServices(overrides = {}) {
   return {
-    nextApplicationId: async () => "2026-000012",
+    nextApplicationId: async () => "2026-10-0012",
     persistState: async () => {},
     finalizeMultiDocuments: async ({ beneficiaries, assertOwnership }) => { await assertOwnership(); return beneficiaries; },
     appendMultiRequest: async () => {},
@@ -421,7 +476,7 @@ test("individual single confirmation keeps its Sheets-profile-success-reset orde
   const state = { stage: "CONFIRMATION", request: { type: "individual", multiPackage: false, data: { name: "Applicant" }, documents: {} } };
   const effects = [];
   await confirmRequest("phone", state, async () => {}, {
-    nextApplicationId: async () => "2026-000013",
+    nextApplicationId: async () => "2026-10-0013",
     persistState: async () => {},
     appendRequest: async () => { effects.push("sheets"); },
     persistApplicantProfile: async () => { effects.push("profile"); },
@@ -429,6 +484,29 @@ test("individual single confirmation keeps its Sheets-profile-success-reset orde
     clearState: async () => { effects.push("reset"); },
   });
   assert.deepEqual(effects, ["sheets", "profile", "whatsapp", "reset"]);
+});
+
+test("confirmation keeps its allocated Kyiv month when work crosses into a new month", async () => {
+  const redis = new FakeRedis();
+  const state = { stage: "CONFIRMATION", request: { type: "individual", multiPackage: false, data: { name: "Applicant" }, documents: {} } };
+  let currentTime = new Date("2026-10-31T21:59:59.000Z");
+  let recordedId;
+  await confirmRequest("phone", state, async () => {}, {
+    nextApplicationId: async () => {
+      const period = getKyivApplicationPeriod(currentTime);
+      const applicationId = await createApplicationNumber(period, 0, { redis });
+      currentTime = new Date("2026-10-31T22:00:01.000Z");
+      return applicationId;
+    },
+    persistState: async () => {},
+    appendRequest: async (_request, applicationId) => { recordedId = applicationId; },
+    persistApplicantProfile: async () => {},
+    sendAccepted: async () => {},
+    clearState: async () => {},
+  });
+  assert.equal(getKyivApplicationPeriod(currentTime), "2026-11");
+  assert.equal(recordedId, "2026-10-0001");
+  assert.equal(state.request.applicationId, "2026-10-0001");
 });
 
 test("ordinary multi and multi_saved_use do not create new canonical profile copies", async () => {
@@ -457,7 +535,7 @@ test("military confirmation retains Sheets-Drive-links-profile-success-reset ord
   };
   const effects = [];
   await confirmRequest("phone", state, async () => {}, {
-    nextApplicationId: async () => "2026-000014",
+    nextApplicationId: async () => "2026-10-0014",
     persistState: async () => {},
     appendRequest: async () => { effects.push("sheets"); },
     finalizeMilitaryDocuments: async ({ documents }) => { effects.push("drive"); return documents; },

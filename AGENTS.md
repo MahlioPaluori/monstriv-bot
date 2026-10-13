@@ -68,6 +68,8 @@ Military та individual profiles мають окремі Redis keys і не п�
 
 У Sheets visible значення колонки B залишається exact `applicationId`, але є clickable signed request-card link. Не дублювати signing logic поза `buildRequestCardUrl()`.
 
+`applicationId` має формат `YYYY-MM-NNNN`, де `YYYY-MM` фіксується один раз за `Europe/Kyiv` перед первинною генерацією, а `NNNN` — місячна послідовність `0001`–`9999`. Redis key: `requests:counter:YYYY-MM`. Перед атомарним виділенням номера враховується максимальний уже записаний sequence у всіх однойменних місячних spreadsheets; retry завжди використовує стабільний ID зі state. Sheets lookup перевіряє лише місяць, закодований в ID, обидві request-вкладки та всі однойменні spreadsheet-файли.
+
 `api/request-card-links-test.js` — temporary repair endpoint, currently retained для відновлення clickable request-card links у вже існуючих Sheets rows; не видаляти випадково. Поточну роботу над production WhatsApp Business App + Cloud API Coexistence не змінювати без окремого запиту: onboarding ще не завершений.
 
 `api/meta/oauth-callback.js` потрібен для Meta-hosted Embedded Signup. Не додавати до нього token exchange, збереження OAuth code або зміну WhatsApp/webhook flow без окремо погодженої задачі.
