@@ -16,12 +16,15 @@ import { downloadWhatsAppMedia } from "../lib/meta-media.js";
 import { finalizeIndividualMultiRequestDocuments, finalizeMilitaryRequestDocuments, getOrCreateApplicantFolder, getOrCreateIndividualMultiBeneficiaryFolder, uploadBufferToDrive } from "../lib/google-drive.js";
 import { appendConfirmedMultiRequest, appendConfirmedRequest, updateMilitaryRequestDocumentLinks } from "../lib/google-sheets.js";
 import {
+  sendActiveRequestNavigation,
   sendApplicationAccepted,
   sendApplicantTypeMenu,
   sendBeneficiaryEditFieldMenu,
+  sendCancelRequestConfirmation,
   sendDocumentDone,
   sendEditMenu,
   sendMainMenu,
+  sendOperatorMenu,
   sendOptionalDocumentPrompt,
   sendPackageModeMenu,
   sendReturningApplicantMenu,
@@ -38,6 +41,14 @@ const PHYSICAL_DOCUMENTS = [
 const MILITARY_UNIT_DOCUMENTS = [{ key: "official_request", label: "📄 Офіційний запит" }];
 const MAX_MULTI_BENEFICIARIES = 5;
 const REQUIRED_PHYSICAL_DOCUMENT_KEYS = PHYSICAL_DOCUMENTS.filter((doc) => !doc.optional).map((doc) => doc.key);
+const MENU_COMMANDS = new Set(["/menu", "меню", "/start", "start", "старт"]);
+const EDIT_FIELD_PROMPTS = {
+  name: "Введіть нове ПІБ.",
+  need: "Введіть новий опис запиту.",
+  militaryUnitNumber: "Введіть новий номер військової частини.",
+  city: "Введіть нове місто.",
+  novaPoshtaBranch: "Введіть нове відділення Нової пошти.",
+};
 
 function docs(state) { return state.request?.type === "military_unit" ? MILITARY_UNIT_DOCUMENTS : PHYSICAL_DOCUMENTS; }
 function activeBeneficiary(state) { return state.request?.multiPackage ? state.request.beneficiaries?.[state.request.currentBeneficiaryIndex] || null : null; }
@@ -149,6 +160,43 @@ async function showConfirmation(from, state) {
   } else await sendText(from, summary(state));
   await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
 }
+
+function isMenuCommand(text) {
+  return MENU_COMMANDS.has(String(text || "").trim().toLowerCase());
+}
+
+function isValidButtonForStage(state, buttonId) {
+  if (!buttonId) return true;
+  const buttonsByStage = {
+    APPLICANT_TYPE: ["individual", "military_unit"],
+    RETURNING_CHOICE: ["use_saved_data", "enter_data_again"],
+    PACKAGE_MODE: ["package_single", "package_multi"],
+    DOCUMENT_UPDATE_DECISION: ["update_documents_yes", "update_documents_no"],
+    RECIPIENT_CHOICE: ["recipient_other_yes", "recipient_other_no"],
+    CONFIRMATION: ["confirm_request", "edit_request"],
+    EDIT_BENEFICIARY_FIELD: ["edit_beneficiary_name", "edit_beneficiary_phone"],
+    EDIT_RECIPIENT_CHOICE: ["edit_recipient_other_yes", "edit_recipient_other_no"],
+  };
+  if (state.stage === "DOCUMENTS") {
+    if (state.request?.multiPackage) {
+      const parsed = parseMultiDocumentButton(buttonId);
+      const doc = currentDoc(state);
+      return Boolean(parsed && doc
+        && parsed.beneficiaryIndex === state.request.currentBeneficiaryIndex
+        && parsed.documentKey === doc.key
+        && (parsed.action === "done" || (parsed.action === "skip" && doc.optional)));
+    }
+    const doc = currentDoc(state);
+    return buttonId === "document_done" || (buttonId === "document_skip" && doc?.optional);
+  }
+  if (state.stage === "EDIT_MENU") {
+    const valid = ["edit_name", "edit_need", "edit_city", "edit_np", "edit_recipient"];
+    if (state.request?.type === "military_unit") valid.push("edit_unit_number");
+    if (state.request?.multiPackage) valid.push("edit_beneficiary");
+    return valid.includes(buttonId);
+  }
+  return (buttonsByStage[state.stage] || []).includes(buttonId);
+}
 async function continueAfterSavedData(from, state) {
   if (!state.request.documents || !Object.keys(state.request.documents).length) return showConfirmation(from, state);
   if (documentsAreOlderThanYear(state.request.savedDocumentsUpdatedAt)) {
@@ -202,6 +250,55 @@ async function recipientChoice(from, state, another) {
     return sendText(from, "Вкажіть, будь ласка, ПІБ іншого отримувача.");
   }
   await showConfirmation(from, state);
+}
+
+async function repeatCurrentPrompt(from, state) {
+  const prompts = {
+    IDENTIFICATION: state.request?.type === "military_unit" ? "Для ідентифікації заявника вкажіть, будь ласка, ПІБ відповідальної особи." : "Для ідентифікації заявника вкажіть, будь ласка, ваше ПІБ.",
+    MILITARY_UNIT_NUMBER: "Вкажіть, будь ласка, номер військової частини.",
+    REQUEST_TYPE: "Напишіть, будь ласка, який саме запит ви хочете подати.",
+    PACKAGE_COUNT: `Скільки окремих осіб мають надати документи? Введіть ціле число від 2 до ${MAX_MULTI_BENEFICIARIES}.`,
+    BENEFICIARY_NAME: `Вкажіть ПІБ особи ${(state.request?.currentBeneficiaryIndex || 0) + 1}, якій належать документи цього комплекту.`,
+    BENEFICIARY_PHONE: "Вкажіть контактний номер телефону особи, якій належать документи цього комплекту.",
+    CITY: "Вкажіть, будь ласка, місто, до якого потрібно оформити отримання.",
+    NOVA_POSHTA_BRANCH: "Вкажіть, будь ласка, номер або адресу відділення Нової пошти.",
+    RECIPIENT_NAME: "Вкажіть, будь ласка, ПІБ іншого отримувача.",
+    RECIPIENT_PHONE: "Вкажіть, будь ласка, номер телефону іншого отримувача.",
+    EDIT_BENEFICIARY_SELECT: `Введіть номер особи, дані якої потрібно змінити: від 1 до ${state.request?.beneficiaryCount || 1}.`,
+    EDIT_BENEFICIARY_TEXT: state.editBeneficiaryField === "phone" ? "Введіть новий контактний номер телефону особи." : "Введіть нове ПІБ особи.",
+    EDIT_RECIPIENT_NAME: "Введіть нове ПІБ іншого отримувача.",
+    EDIT_RECIPIENT_PHONE: "Введіть новий номер телефону іншого отримувача.",
+  };
+  if (prompts[state.stage]) return sendText(from, prompts[state.stage]);
+  if (state.stage === "APPLICANT_TYPE") return sendApplicantTypeMenu(from);
+  if (state.stage === "RETURNING_CHOICE") return sendReturningApplicantMenu(from, state.request?.profile?.lastDocumentsUpdatedAt);
+  if (state.stage === "PACKAGE_MODE") return sendPackageModeMenu(from);
+  if (state.stage === "DOCUMENTS") {
+    const doc = currentDoc(state);
+    const store = activeDocumentStore(state);
+    const hasFiles = Boolean(doc && store?.documents?.[doc.key]?.length);
+    if (hasFiles) {
+      const context = state.request?.multiPackage ? { beneficiaryIndex: state.request.currentBeneficiaryIndex, documentKey: doc.key } : null;
+      return sendDocumentDone(from, doc.label, Boolean(doc.optional), context, true);
+    }
+    return askDocument(from, state);
+  }
+  if (state.stage === "DOCUMENT_UPDATE_DECISION") return sendYesNoMenu(from, "Ваші документи були оновлені понад рік тому. Бажаєте завантажити актуальні документи?", "update_documents_yes", "update_documents_no");
+  if (state.stage === "RECIPIENT_CHOICE") return sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "recipient_other_yes", "recipient_other_no");
+  if (state.stage === "CONFIRMATION") return showConfirmation(from, state);
+  if (state.stage === "EDIT_MENU") return sendEditMenu(from, state.request?.type, state.request?.multiPackage);
+  if (state.stage === "EDIT_BENEFICIARY_FIELD") return sendBeneficiaryEditFieldMenu(from, (state.editBeneficiaryIndex || 0) + 1);
+  if (state.stage === "EDIT_RECIPIENT_CHOICE") return sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "edit_recipient_other_yes", "edit_recipient_other_no");
+  if (state.stage === "EDIT_TEXT") {
+    const prompt = EDIT_FIELD_PROMPTS[state.editField];
+    if (prompt) return sendText(from, prompt);
+    delete state.editField;
+    state.stage = "EDIT_MENU";
+    await saveUserState(from, state);
+    await sendText(from, "Не вдалося визначити поле для редагування. Оберіть його ще раз.");
+    return sendEditMenu(from, state.request?.type, state.request?.multiPackage);
+  }
+  return sendText(from, "Продовжуйте заповнення заявки з поточного кроку.");
 }
 async function confirmRequest(from, state) {
   const request = state.request;
@@ -276,7 +373,6 @@ export default async function handler(req, res) {
     if (["/reset", "reset"].includes(text.toLowerCase())) {
       await resetUserState(from); await sendText(from, "Тестову сесію скинуто. Починаємо заново."); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
     }
-    if (!text && !buttonId && !fileId) { await sendText(from, "Будь ласка, скористайтеся кнопками меню або надішліть текстове повідомлення чи файл."); return res.status(200).send("EVENT_RECEIVED"); }
     let state = await getUserState(from);
     if (!state) {
       state = await createUserState(from); state.request = { data: { phone: from }, documents: {}, documentIndex: 0 };
@@ -286,11 +382,46 @@ export default async function handler(req, res) {
       }
       if (buttonId !== "operator") {
         state.stage = "MAIN_MENU"; await saveUserState(from, state);
-        await sendText(from, "Вітаємо! Це бот для автоматизованого оформлення запитів.\n\nСпочатку ми визначимо заявника, потім уточнимо потребу та послідовно зберемо необхідні дані й документи. Після перевірки ви підтвердите заявку, а далі нею займатиметься оператор.\n\nОберіть потрібну дію нижче."); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
+        await sendText(from, "Вітаємо! 👋\n\nВи звернулися до Благодійного фонду «Корпорація Монстрів».\n\nТут ви можете подати запит на допомогу або звернутися до оператора.\n\nДля продовження оберіть потрібну дію нижче 👇"); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
       }
+      state.stage = "MAIN_MENU";
     }
-    if (buttonId === "operator") { state.operatorRequested = true; state.stage = "OPERATOR"; await saveUserState(from, state); await sendText(from, "Ваше повідомлення передано оператору. Очікуйте, будь ласка, відповіді."); return res.status(200).send("EVENT_RECEIVED"); }
-    if (buttonId === "send_request") { state.operatorRequested = false; state.stage = "APPLICANT_TYPE"; state.request = { type: null, data: { phone: from }, documents: {}, documentIndex: 0 }; await saveUserState(from, state); await sendApplicantTypeMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
+    if (!text && !buttonId && !fileId) {
+      if (state.stage !== "OPERATOR") await sendText(from, "Будь ласка, скористайтеся кнопками меню або надішліть текстове повідомлення чи файл.");
+      return res.status(200).send("EVENT_RECEIVED");
+    }
+    if (state.stage === "OPERATOR" && (buttonId === "back_to_menu" || isMenuCommand(text))) {
+      state.operatorRequested = false; state.stage = "MAIN_MENU"; await saveUserState(from, state);
+      await sendText(from, "Ви повернулися до головного меню"); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
+    }
+    if (state.stage === "MAIN_MENU" && isMenuCommand(text)) { await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
+
+    if (state.stage === "CANCEL_CONFIRMATION") {
+      if (buttonId === "confirm_cancel_request") {
+        await resetUserState(from); state = await createUserState(from); state.stage = "MAIN_MENU"; await saveUserState(from, state);
+        await sendText(from, "Заявку скасовано. Ви повернулися до головного меню."); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
+      }
+      if (buttonId === "keep_request") {
+        state.stage = state.cancelReturnStage; delete state.cancelReturnStage; await saveUserState(from, state);
+        await repeatCurrentPrompt(from, state); return res.status(200).send("EVENT_RECEIVED");
+      }
+      await sendCancelRequestConfirmation(from); return res.status(200).send("EVENT_RECEIVED");
+    }
+
+    const hasActiveRequest = !["NEW", "MAIN_MENU", "OPERATOR", "CONFIRMED"].includes(state.stage) && Boolean(state.request);
+    if (hasActiveRequest && isMenuCommand(text)) { await sendActiveRequestNavigation(from); return res.status(200).send("EVENT_RECEIVED"); }
+    if (hasActiveRequest && buttonId === "resume_request") { await repeatCurrentPrompt(from, state); return res.status(200).send("EVENT_RECEIVED"); }
+    if (hasActiveRequest && buttonId === "cancel_request") {
+      state.cancelReturnStage = state.stage; state.stage = "CANCEL_CONFIRMATION"; await saveUserState(from, state);
+      await sendCancelRequestConfirmation(from); return res.status(200).send("EVENT_RECEIVED");
+    }
+    if (hasActiveRequest && buttonId && !isValidButtonForStage(state, buttonId)) {
+      await sendText(from, "Ця кнопка вже не актуальна. Продовжимо з поточного кроку.");
+      await repeatCurrentPrompt(from, state); return res.status(200).send("EVENT_RECEIVED");
+    }
+
+    if (state.stage === "MAIN_MENU" && buttonId === "operator") { state.operatorRequested = true; state.stage = "OPERATOR"; await saveUserState(from, state); await sendOperatorMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "MAIN_MENU" && buttonId === "send_request") { state.operatorRequested = false; state.stage = "APPLICANT_TYPE"; state.request = { type: null, data: { phone: from }, documents: {}, documentIndex: 0 }; await saveUserState(from, state); await sendApplicantTypeMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
 
     if (state.stage === "APPLICANT_TYPE") {
       if (buttonId === "individual" || buttonId === "military_unit") {
@@ -349,10 +480,10 @@ export default async function handler(req, res) {
 
     if (state.stage === "CONFIRMATION" && buttonId === "edit_request") { state.stage = "EDIT_MENU"; await saveUserState(from, state); await sendEditMenu(from, state.request.type, state.request.multiPackage); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_MENU") {
-      const prompts = { edit_name: ["name", "Введіть нове ПІБ."], edit_need: ["need", "Введіть новий опис запиту."], edit_unit_number: ["militaryUnitNumber", "Введіть новий номер військової частини."], edit_city: ["city", "Введіть нове місто."], edit_np: ["novaPoshtaBranch", "Введіть нове відділення Нової пошти."] };
+      const prompts = { edit_name: "name", edit_need: "need", edit_unit_number: "militaryUnitNumber", edit_city: "city", edit_np: "novaPoshtaBranch" };
       if (buttonId === "edit_recipient") { state.stage = "EDIT_RECIPIENT_CHOICE"; await saveUserState(from, state); await sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "edit_recipient_other_yes", "edit_recipient_other_no"); return res.status(200).send("EVENT_RECEIVED"); }
       if (buttonId === "edit_beneficiary" && state.request.multiPackage) { state.stage = "EDIT_BENEFICIARY_SELECT"; await saveUserState(from, state); await sendText(from, `Введіть номер особи, дані якої потрібно змінити: від 1 до ${state.request.beneficiaryCount}.`); return res.status(200).send("EVENT_RECEIVED"); }
-      const selected = prompts[buttonId]; if (selected) { state.editField = selected[0]; state.stage = "EDIT_TEXT"; await saveUserState(from, state); await sendText(from, selected[1]); return res.status(200).send("EVENT_RECEIVED"); }
+      const selected = prompts[buttonId]; if (selected) { state.editField = selected; state.stage = "EDIT_TEXT"; await saveUserState(from, state); await sendText(from, EDIT_FIELD_PROMPTS[selected]); return res.status(200).send("EVENT_RECEIVED"); }
       await sendEditMenu(from, state.request.type, state.request.multiPackage); return res.status(200).send("EVENT_RECEIVED");
     }
     if (state.stage === "EDIT_BENEFICIARY_SELECT") { const selected = /^\d+$/.test(text) ? Number(text) - 1 : NaN; if (!Number.isInteger(selected) || selected < 0 || selected >= state.request.beneficiaryCount) { await sendText(from, `Введіть номер особи від 1 до ${state.request.beneficiaryCount}.`); return res.status(200).send("EVENT_RECEIVED"); } state.editBeneficiaryIndex = selected; state.stage = "EDIT_BENEFICIARY_FIELD"; await saveUserState(from, state); await sendBeneficiaryEditFieldMenu(from, selected + 1); return res.status(200).send("EVENT_RECEIVED"); }
