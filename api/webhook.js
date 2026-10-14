@@ -468,7 +468,13 @@ export async function confirmRequest(from, state, assertClaimOwnership, services
     await assertClaimOwnership();
     await operations.persistApplicantProfile(from, request);
     await assertClaimOwnership();
-    await operations.sendAccepted(from, request.applicationId);
+    try {
+      await operations.sendAccepted(from, request.applicationId);
+    } catch (error) {
+      confirmationLog("confirmation_success_message_failed", request, {
+        errorCode: error?.code || "UNKNOWN",
+      });
+    }
     await assertClaimOwnership();
     await operations.clearState(from);
     return;
@@ -507,7 +513,13 @@ export async function confirmRequest(from, state, assertClaimOwnership, services
     await assertClaimOwnership();
   }
   await assertClaimOwnership();
-  await operations.sendAccepted(from, request.applicationId);
+  try {
+    await operations.sendAccepted(from, request.applicationId);
+  } catch (error) {
+    confirmationLog("confirmation_success_message_failed", request, {
+      errorCode: error?.code || "UNKNOWN",
+    });
+  }
   await assertClaimOwnership();
   await operations.clearState(from);
 }
@@ -537,15 +549,17 @@ export async function sendConfirmationFailure(from, state, assertClaimOwnership,
     && state.request?.multiPackage
     && state.request?.refreshApplicantProfileDocuments;
   const message = profileRefreshPending
-    ? "Заявку вже зареєстровано, але оновлення збережених документів ще не завершене. Будь ласка, натисніть «Підтвердити заявку» ще раз, щоб завершити оновлення."
+    ? "Заявку вже зареєстровано, але оновлення збережених документів ще не завершене. Стан збережено для безпечного технічного відновлення."
     : sheetsRecorded
-      ? "Заявку вже зареєстровано, але завершити її технічну обробку ще не вдалося. Будь ласка, натисніть «Підтвердити заявку» ще раз."
+      ? "Заявку вже зареєстровано, але завершити її технічну обробку ще не вдалося. Стан збережено для безпечного технічного відновлення."
       : "Не вдалося зареєструвати заявку через тимчасову технічну помилку. Будь ласка, натисніть «Підтвердити заявку» ще раз.";
   await assertClaimOwnership();
   await sendFailureText(from, message);
   await assertClaimOwnership();
-  await sendRetryMenu(from);
-  await assertClaimOwnership();
+  if (!sheetsRecorded) {
+    await sendRetryMenu(from);
+    await assertClaimOwnership();
+  }
   confirmationLog("confirmation_recoverable_failure", state.request, {
     sheetsRecorded,
     errorCode: error?.code || "UNKNOWN",
@@ -558,11 +572,29 @@ export async function handleConfirmationResult(from, state, result, services = {
   const sendRetryMenu = services.sendRetryMenu || sendConfirmationRetryMenu;
   if (result?.busy) {
     confirmationLog("confirmation_claim_busy", state.request);
-    await sendMessage(from, "Заявка вже підтверджується. Зачекайте завершення поточної обробки. Якщо результат не надійде, повторіть підтвердження трохи пізніше.");
-    await sendRetryMenu(from);
   } else if (result?.claimLost) {
-    await sendMessage(from, "Поточна спроба підтвердження була перервана. Дані заявки збережено — спробуйте підтвердити її ще раз.");
-    await sendRetryMenu(from);
+    const acquireClaim = services.acquireClaim || acquireConfirmationClaim;
+    const renewClaim = services.renewClaim || renewConfirmationClaim;
+    const releaseClaim = services.releaseClaim || releaseConfirmationClaim;
+    const loadState = services.loadState || getUserState;
+    const lookupRequest = services.lookupRequest || findRequestByApplicationId;
+    const recoveryOwner = services.recoveryOwner || randomUUID();
+    if (!await acquireClaim(from, recoveryOwner)) return result;
+    try {
+      const latestState = await loadState(from);
+      if (latestState?.stage !== "CONFIRMATION" || !latestState.request) return result;
+      const applicationId = latestState.request.applicationId;
+      if (applicationId) {
+        const lookup = await lookupRequest(applicationId);
+        if (lookup?.result === "found" || lookup?.result === "duplicate") return result;
+      }
+      if (!await renewClaim(from, recoveryOwner)) return result;
+      await sendMessage(from, "Поточна спроба підтвердження була перервана. Дані заявки збережено — спробуйте підтвердити її ще раз.");
+      if (!await renewClaim(from, recoveryOwner)) return result;
+      await sendRetryMenu(from);
+    } finally {
+      await releaseClaim(from, recoveryOwner);
+    }
   }
   return result;
 }
@@ -575,6 +607,7 @@ export async function runClaimedConfirmation(from, dependencies = {}) {
   const loadState = dependencies.loadState || getUserState;
   const performConfirmation = dependencies.performConfirmation || confirmRequest;
   const handleFailure = dependencies.handleFailure || sendConfirmationFailure;
+  const sendProcessingStarted = dependencies.sendProcessingStarted || sendText;
   const ownerToken = dependencies.ownerToken || randomUUID();
   const heartbeatMs = dependencies.heartbeatMs || Math.max(1000, Math.floor(CONFIRMATION_CLAIM_TTL_SECONDS * 1000 / 3));
   const acquired = await acquireClaim(from, ownerToken);
@@ -610,6 +643,15 @@ export async function runClaimedConfirmation(from, dependencies = {}) {
     const latestState = await loadState(from);
     if (latestState?.stage !== "CONFIRMATION" || !latestState.request) return { stale: true };
     try {
+      await assertClaimOwnership();
+      try {
+        await sendProcessingStarted(from, "⏳ Реєструємо вашу заявку. Будь ласка, зачекайте на підтвердження.");
+      } catch (error) {
+        confirmationLog("confirmation_processing_message_failed", latestState.request, {
+          errorCode: error?.code || "UNKNOWN",
+        });
+      }
+      await assertClaimOwnership();
       await performConfirmation(from, latestState, assertClaimOwnership, dependencies.confirmationServices);
       return { completed: true };
     } catch (error) {
@@ -655,6 +697,7 @@ export default async function handler(req, res) {
       await resetUserState(from); await sendText(from, "Тестову сесію скинуто. Починаємо заново."); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
     }
     let state = await getUserState(from);
+    if (!state && buttonId === "confirm_request") return res.status(200).send("EVENT_RECEIVED");
     if (!state) {
       state = await createUserState(from); state.request = { data: { phone: from }, documents: {}, documentIndex: 0 };
       if (buttonId === "send_request") {
@@ -810,12 +853,6 @@ export default async function handler(req, res) {
           await handleConfirmationResult(from, state, result);
         } catch (error) {
           confirmationLog("confirmation_handler_failed", state.request, { errorCode: error?.code || "UNKNOWN" });
-          try {
-            await sendText(from, "Не вдалося завершити підтвердження через тимчасову технічну помилку. Дані заявки збережено.");
-            await sendConfirmationRetryMenu(from);
-          } catch (messageError) {
-            confirmationLog("confirmation_recovery_message_failed", state.request, { errorCode: messageError?.code || "UNKNOWN" });
-          }
         }
       } else if (buttonId === "edit_request") {
         state.stage = "EDIT_MENU";

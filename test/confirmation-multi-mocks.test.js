@@ -137,6 +137,7 @@ function confirmationHarness(state) {
       return true;
     },
     loadState: async () => state,
+    sendProcessingStarted: async () => {},
     loseClaim: () => { owner = null; },
   };
 }
@@ -158,6 +159,58 @@ test("two concurrent confirmation callbacks execute the protected work once", as
   releaseWork();
   assert.deepEqual(await first, { completed: true });
   assert.equal(executions, 1);
+});
+
+test("the claim owner sends one processing message and one success path while a concurrent callback stays silent", async () => {
+  const state = { stage: "CONFIRMATION", request: {} };
+  const harness = confirmationHarness(state);
+  const messages = [];
+  let releaseWork;
+  const workGate = new Promise((resolve) => { releaseWork = resolve; });
+  const first = runClaimedConfirmation("380000000014", {
+    ...harness,
+    ownerToken: "owner-a",
+    sendProcessingStarted: async (_phone, message) => { messages.push(message); },
+    performConfirmation: async () => {
+      await workGate;
+      messages.push("success");
+      state.stage = "MAIN_MENU";
+    },
+  });
+  const secondResult = await runClaimedConfirmation("380000000014", {
+    ...harness,
+    ownerToken: "owner-b",
+    sendProcessingStarted: async () => { messages.push("unexpected-processing"); },
+  });
+  await handleConfirmationResult("380000000014", state, secondResult, {
+    sendText: async () => { messages.push("unexpected-busy-message"); },
+    sendRetryMenu: async () => { messages.push("unexpected-busy-menu"); },
+  });
+  releaseWork();
+  assert.deepEqual(await first, { completed: true });
+  assert.equal(messages.filter((message) => message.includes("Реєструємо")).length, 1);
+  assert.deepEqual(messages, [
+    "⏳ Реєструємо вашу заявку. Будь ласка, зачекайте на підтвердження.",
+    "success",
+  ]);
+});
+
+test("a processing-message timeout does not prevent the claim owner from completing registration", async () => {
+  const state = { stage: "CONFIRMATION", request: {} };
+  const harness = confirmationHarness(state);
+  let completed = false;
+  const result = await runClaimedConfirmation("380000000015", {
+    ...harness,
+    ownerToken: "owner-a",
+    sendProcessingStarted: async () => {
+      const error = new Error("possible delivery timeout");
+      error.code = "ETIMEDOUT";
+      throw error;
+    },
+    performConfirmation: async () => { completed = true; state.stage = "MAIN_MENU"; },
+  });
+  assert.deepEqual(result, { completed: true });
+  assert.equal(completed, true);
 });
 
 test("retry after application ID persistence reuses state, and completed callbacks are stale", async () => {
@@ -489,7 +542,7 @@ test("new multi decision stages repeat their production prompt for ordinary text
   assert.deepEqual(calls, ["included", "saved-documents"]);
 });
 
-test("recoverable confirmation failure keeps CONFIRMATION and sends a fresh retry menu", async () => {
+test("post-Sheets failure keeps CONFIRMATION but does not invite duplicate registration", async () => {
   const state = { stage: "CONFIRMATION", request: { type: "individual", applicationId: "2026-10-0042" } };
   const messages = [];
   let menus = 0;
@@ -502,10 +555,10 @@ test("recoverable confirmation failure keeps CONFIRMATION and sends a fresh retr
   assert.deepEqual(result, { failed: true, sheetsRecorded: true });
   assert.equal(state.stage, "CONFIRMATION");
   assert.match(messages[0], /вже зареєстровано/);
-  assert.equal(menus, 1);
+  assert.equal(menus, 0);
 });
 
-test("busy and claimLost results provide a safe retry action", async () => {
+test("busy is silent and claimLost only offers retry when no owner remains", async () => {
   const state = { stage: "CONFIRMATION", request: { type: "individual", applicationId: "2026-10-0043" } };
   const messages = [];
   let menus = 0;
@@ -514,10 +567,53 @@ test("busy and claimLost results provide a safe retry action", async () => {
     sendRetryMenu: async () => { menus += 1; },
   };
   await handleConfirmationResult("phone", state, { busy: true }, services);
-  await handleConfirmationResult("phone", state, { claimLost: true }, services);
-  assert.equal(messages.length, 2);
-  assert.equal(menus, 2);
+  await handleConfirmationResult("phone", state, { claimLost: true }, {
+    ...services,
+    acquireClaim: async () => false,
+    renewClaim: async () => false,
+    releaseClaim: async () => {},
+    loadState: async () => state,
+  });
+  assert.equal(messages.length, 0);
+  assert.equal(menus, 0);
+  await handleConfirmationResult("phone", state, { claimLost: true }, {
+    ...services,
+    acquireClaim: async () => true,
+    renewClaim: async () => true,
+    releaseClaim: async () => true,
+    loadState: async () => state,
+    lookupRequest: async () => ({ result: "not_found" }),
+  });
+  assert.equal(messages.length, 1);
+  assert.equal(menus, 1);
   assert.equal(state.stage, "CONFIRMATION");
+});
+
+test("claimLost does not offer retry after another handler completed the request", async () => {
+  const calls = [];
+  await handleConfirmationResult("phone", { stage: "CONFIRMATION", request: {} }, { claimLost: true }, {
+    acquireClaim: async () => true,
+    renewClaim: async () => true,
+    releaseClaim: async () => true,
+    loadState: async () => ({ stage: "MAIN_MENU" }),
+    sendText: async () => { calls.push("message"); },
+    sendRetryMenu: async () => { calls.push("menu"); },
+  });
+  assert.deepEqual(calls, []);
+});
+
+test("claimLost does not offer retry when Sheets already contains the application", async () => {
+  const calls = [];
+  await handleConfirmationResult("phone", { stage: "CONFIRMATION", request: {} }, { claimLost: true }, {
+    acquireClaim: async () => true,
+    renewClaim: async () => true,
+    releaseClaim: async () => true,
+    loadState: async () => ({ stage: "CONFIRMATION", request: { applicationId: "2026-10-0044" } }),
+    lookupRequest: async () => ({ result: "found" }),
+    sendText: async () => { calls.push("message"); },
+    sendRetryMenu: async () => { calls.push("menu"); },
+  });
+  assert.deepEqual(calls, []);
 });
 
 test("ordinary text recovery at CONFIRMATION repeats the production confirmation prompt", async () => {
@@ -540,6 +636,24 @@ test("individual single confirmation keeps its Sheets-profile-success-reset orde
     clearState: async () => { effects.push("reset"); },
   });
   assert.deepEqual(effects, ["sheets", "profile", "whatsapp", "reset"]);
+});
+
+test("a possible WhatsApp timeout after registration does not turn success into a retry failure", async () => {
+  const state = { stage: "CONFIRMATION", request: { type: "individual", multiPackage: false, data: { name: "Applicant" }, documents: {} } };
+  const effects = [];
+  await confirmRequest("phone", state, async () => {}, confirmationServices({
+    persistState: async () => { effects.push("state"); },
+    appendRequest: async () => { effects.push("sheets"); },
+    persistApplicantProfile: async () => { effects.push("profile"); },
+    sendAccepted: async () => {
+      effects.push("success-attempt");
+      const error = new Error("possible delivery timeout");
+      error.code = "ETIMEDOUT";
+      throw error;
+    },
+    clearState: async () => { effects.push("reset"); },
+  }));
+  assert.deepEqual(effects, ["state", "sheets", "state", "profile", "success-attempt", "reset"]);
 });
 
 test("confirmation keeps its allocated Kyiv month when work crosses into a new month", async () => {
