@@ -46,12 +46,12 @@ import {
 } from "../lib/whatsapp.js";
 
 const PHYSICAL_DOCUMENTS = [
-  { key: "passport", label: "📕 Паспорт", confirmationLabel: "📕 Паспорт", uploadPrompt: "📸 Надішліть фото паспорта. Розмір кожного файлу — не більше 5 МБ." },
+  { key: "passport", label: "📕 Паспорт", confirmationLabel: "📕 Паспорт", uploadPrompt: "📸 Надішліть фото першої сторінки паспорта.\n\nНам потрібна лише перша сторінка.\n\nРозмір кожного файлу — не більше 5 МБ." },
   { key: "rnokpp", label: "🪪 РНОКПП (ідентифікаційний код)", confirmationLabel: "🪪 РНОКПП", uploadPrompt: "📸 Надішліть фото РНОКПП (ідентифікаційного коду). Розмір кожного файлу — не більше 5 МБ." },
-  { key: "military_id", label: "🎖 Військовий квиток / посвідчення", confirmationLabel: "🎖 Військово-обліковий документ", uploadPrompt: "📸 Надішліть фото військово-облікового документа. Розмір кожного файлу — не більше 5 МБ." },
+  { key: "military_id", label: "🎖 Військовий квиток / посвідчення", confirmationLabel: "🎖 Військово-обліковий документ", uploadPrompt: "📸 Надішліть фото військово-облікового документа.\n\nПотрібні дві сторінки:\n\n1. Перша сторінка.\n2. Сторінка з актуальною військовою частиною та посадою (розділ 17).\n\nРозмір кожного файлу — не більше 5 МБ." },
   { key: "ubd", label: "🏅 Посвідчення УБД", confirmationLabel: "🏅 УБД", uploadPrompt: "📸 Надішліть фото посвідчення учасника бойових дій (УБД). Розмір кожного файлу — не більше 5 МБ.", optional: true },
 ];
-const MILITARY_UNIT_DOCUMENTS = [{ key: "official_request", label: "📄 Офіційний запит", confirmationLabel: "📄 Офіційний лист військової частини", uploadPrompt: "📸 Надішліть фото офіційного листа військової частини. Розмір кожного файлу — не більше 5 МБ." }];
+const MILITARY_UNIT_DOCUMENTS = [{ key: "official_request", label: "📄 Офіційний запит", confirmationLabel: "📄 Офіційний лист військової частини", uploadPrompt: "📸 Надішліть фото листа-запиту від військової частини.\n\nРозмір кожного файлу — не більше 5 МБ." }];
 const MAX_MULTI_BENEFICIARIES = 5;
 const REQUIRED_PHYSICAL_DOCUMENT_KEYS = PHYSICAL_DOCUMENTS.filter((doc) => !doc.optional).map((doc) => doc.key);
 const MENU_COMMANDS = new Set(["/menu", "меню", "/start", "start", "старт"]);
