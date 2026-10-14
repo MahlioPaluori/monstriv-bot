@@ -20,6 +20,7 @@ import {
   saveUserState,
 } from "../lib/state.js";
 import { downloadWhatsAppMedia } from "../lib/meta-media.js";
+import { filterValidatedDocuments, isValidatedDocument, MediaValidationError } from "../lib/media-validation.js";
 import { createCanonicalApplicantDocumentCopies, finalizeIndividualMultiRequestDocuments, finalizeMilitaryRequestDocuments, getOrCreateApplicantFolder, getOrCreateIndividualMultiBeneficiaryFolder, uploadBufferToDrive } from "../lib/google-drive.js";
 import { appendConfirmedMultiRequest, appendConfirmedRequest, findRequestByApplicationId, getMaxApplicationSequenceForPeriod, updateMilitaryRequestDocumentLinks } from "../lib/google-sheets.js";
 import {
@@ -42,12 +43,12 @@ import {
 } from "../lib/whatsapp.js";
 
 const PHYSICAL_DOCUMENTS = [
-  { key: "passport", label: "📕 Паспорт", uploadPrompt: "📸 Надішліть фото паспорта." },
-  { key: "rnokpp", label: "🪪 РНОКПП (ідентифікаційний код)", uploadPrompt: "📸 Надішліть фото РНОКПП (ідентифікаційного коду)." },
-  { key: "military_id", label: "🎖 Військовий квиток / посвідчення", uploadPrompt: "📸 Надішліть фото військово-облікового документа." },
-  { key: "ubd", label: "🏅 Посвідчення УБД", uploadPrompt: "📸 Надішліть фото посвідчення учасника бойових дій (УБД).", optional: true },
+  { key: "passport", label: "📕 Паспорт", uploadPrompt: "📸 Надішліть фото паспорта. Розмір кожного файлу — не більше 5 МБ." },
+  { key: "rnokpp", label: "🪪 РНОКПП (ідентифікаційний код)", uploadPrompt: "📸 Надішліть фото РНОКПП (ідентифікаційного коду). Розмір кожного файлу — не більше 5 МБ." },
+  { key: "military_id", label: "🎖 Військовий квиток / посвідчення", uploadPrompt: "📸 Надішліть фото військово-облікового документа. Розмір кожного файлу — не більше 5 МБ." },
+  { key: "ubd", label: "🏅 Посвідчення УБД", uploadPrompt: "📸 Надішліть фото посвідчення учасника бойових дій (УБД). Розмір кожного файлу — не більше 5 МБ.", optional: true },
 ];
-const MILITARY_UNIT_DOCUMENTS = [{ key: "official_request", label: "📄 Офіційний запит", uploadPrompt: "📸 Надішліть фото офіційного листа військової частини." }];
+const MILITARY_UNIT_DOCUMENTS = [{ key: "official_request", label: "📄 Офіційний запит", uploadPrompt: "📸 Надішліть фото офіційного листа військової частини. Розмір кожного файлу — не більше 5 МБ." }];
 const MAX_MULTI_BENEFICIARIES = 5;
 const REQUIRED_PHYSICAL_DOCUMENT_KEYS = PHYSICAL_DOCUMENTS.filter((doc) => !doc.optional).map((doc) => doc.key);
 const MENU_COMMANDS = new Set(["/menu", "меню", "/start", "start", "старт"]);
@@ -102,9 +103,9 @@ function hasCompleteSavedApplicantPackage(request) {
     && request.data?.name?.trim()
     && normalizePhone(request.data.phone)
     && REQUIRED_PHYSICAL_DOCUMENT_KEYS.every((key) => request.documents?.[key]?.length
-      && request.documents[key].every((document) => typeof document?.driveFileId === "string" && document.driveFileId))
+      && request.documents[key].every((document) => typeof document?.driveFileId === "string" && document.driveFileId && isValidatedDocument(document)))
     && PHYSICAL_DOCUMENTS.every(({ key }) => !request.documents?.[key]
-      || request.documents[key].every((document) => typeof document?.driveFileId === "string" && document.driveFileId)));
+      || request.documents[key].every((document) => typeof document?.driveFileId === "string" && document.driveFileId && isValidatedDocument(document))));
 }
 function savedApplicantSourceDocuments(documents) {
   return Object.fromEntries(PHYSICAL_DOCUMENTS.map(({ key }) => [key, (documents?.[key] || []).map((document) => ({
@@ -153,40 +154,92 @@ function documentsAreOlderThanYear(dateString) {
   if (!Number.isFinite(updated)) return true;
   return Date.now() - updated > 365 * 24 * 60 * 60 * 1000;
 }
-function fileExtension(message, mimeType) {
-  if (message.type === "document" && message.document?.filename) {
-    const match = message.document.filename.match(/\.([a-z0-9]+)$/i);
-    if (match) return `.${match[1].toLowerCase()}`;
-  }
-  return { "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "application/pdf": ".pdf" }[mimeType] || ".bin";
+
+export function prepareSavedDocumentsForReuse(documents) {
+  const savedDocuments = JSON.parse(JSON.stringify(documents || {}));
+  const validatedDocuments = filterValidatedDocuments(savedDocuments);
+  const savedCount = Object.values(savedDocuments).reduce((count, files) => count + (Array.isArray(files) ? files.length : 0), 0);
+  const validatedCount = Object.values(validatedDocuments).reduce((count, files) => count + files.length, 0);
+  const legacyDocumentsRequireUpload = savedCount > validatedCount;
+  return {
+    documents: legacyDocumentsRequireUpload ? {} : validatedDocuments,
+    legacyDocumentsRequireUpload,
+  };
 }
 
-async function saveIncomingDocument(from, state, message, fileId, doc) {
-  const claimed = await claimMediaUpload(from, fileId);
+function documentCollections(request) {
+  const collections = [request?.documents];
+  if (Array.isArray(request?.beneficiaries)) collections.push(...request.beneficiaries.map((beneficiary) => beneficiary?.documents));
+  return collections.filter((documents) => documents && typeof documents === "object" && !Array.isArray(documents));
+}
+
+export function requestDocumentsHaveValidation(request) {
+  for (const documents of documentCollections(request)) {
+    for (const files of Object.values(documents)) {
+      if (!Array.isArray(files) || files.some((document) => !isValidatedDocument(document))) return false;
+    }
+  }
+  return true;
+}
+
+export function assertRequestDocumentsHaveValidation(request) {
+  if (!requestDocumentsHaveValidation(request)) {
+    throw new MediaValidationError("UNVALIDATED_REQUEST_DOCUMENTS", "Request contains documents without current validation metadata");
+  }
+}
+
+export async function restartRequestWithUnvalidatedDocuments(from, state, services = {}) {
+  if (requestDocumentsHaveValidation(state.request)) return false;
+  const persistState = services.saveUserState || saveUserState;
+  const notify = services.sendText || sendText;
+  const showApplicantTypes = services.sendApplicantTypeMenu || sendApplicantTypeMenu;
+  state.stage = "APPLICANT_TYPE";
+  state.request = { type: null, data: { phone: from }, documents: {}, documentIndex: 0 };
+  delete state.editField;
+  delete state.editBeneficiaryIndex;
+  delete state.editBeneficiaryField;
+  delete state.cancelReturnStage;
+  await persistState(from, state);
+  await notify(from, "Документи в незавершеній тестовій заявці не мають нової перевірки безпеки. Будь ласка, почніть заявку знову та завантажте документи повторно.");
+  await showApplicantTypes(from);
+  return true;
+}
+
+export async function saveIncomingDocument(from, state, message, fileId, doc, services = {}) {
+  const claimUpload = services.claimMediaUpload || claimMediaUpload;
+  const releaseClaim = services.releaseMediaUploadClaim || releaseMediaUploadClaim;
+  const downloadMedia = services.downloadWhatsAppMedia || downloadWhatsAppMedia;
+  const uploadDrive = services.uploadBufferToDrive || uploadBufferToDrive;
+  const persistState = services.saveUserState || saveUserState;
+  const getApplicantFolder = services.getOrCreateApplicantFolder || getOrCreateApplicantFolder;
+  const getMultiFolder = services.getOrCreateIndividualMultiBeneficiaryFolder || getOrCreateIndividualMultiBeneficiaryFolder;
+  const nextSequence = services.nextDocumentSequence || nextDocumentSequence;
+  const claimed = await claimUpload(from, fileId);
   if (!claimed) return false;
   try {
+    const media = await downloadMedia(fileId);
     const beneficiary = activeBeneficiary(state);
     let folder;
     if (beneficiary) {
-      folder = await getOrCreateIndividualMultiBeneficiaryFolder(state.request.data.name, beneficiary.name);
+      folder = await getMultiFolder(state.request.data.name, beneficiary.name);
     } else {
       const identifier = state.request.type === "military_unit" ? state.request.data.militaryUnitNumber : state.request.data.name;
       if (!identifier) throw new Error("Applicant identifier is missing for Drive folder");
-      folder = await getOrCreateApplicantFolder(state.request.type, identifier);
+      folder = await getApplicantFolder(state.request.type, identifier);
     }
-    const media = await downloadWhatsAppMedia(fileId);
     const sequenceScope = beneficiary ? `multi:${state.request.currentBeneficiaryIndex}:${doc.key}` : doc.key;
-    const sequence = await nextDocumentSequence(from, sequenceScope);
-    const extension = fileExtension(message, media.mimeType);
+    const sequence = await nextSequence(from, sequenceScope);
+    const extension = media.extension;
+    if (!extension || !media.validation) throw new MediaValidationError("INVALID_MEDIA", "Validated media metadata is missing");
     const fileName = `${doc.key}${sequence}${extension}`;
-    const driveFile = await uploadBufferToDrive({ buffer: media.buffer, name: fileName, mimeType: media.mimeType, parentId: folder.id });
+    const driveFile = await uploadDrive({ buffer: media.buffer, name: fileName, mimeType: media.mimeType, parentId: folder.id });
     const store = activeDocumentStore(state);
     if (!store.documents[doc.key]) store.documents[doc.key] = [];
-    store.documents[doc.key].push({ mediaId: fileId, type: message.type, receivedAt: new Date().toISOString(), driveFileId: driveFile.id, driveUrl: driveFile.webViewLink || `https://drive.google.com/file/d/${driveFile.id}/view`, fileName: driveFile.name });
-    await saveUserState(from, state);
+    store.documents[doc.key].push({ mediaId: fileId, type: message.type, receivedAt: new Date().toISOString(), driveFileId: driveFile.id, driveUrl: driveFile.webViewLink || `https://drive.google.com/file/d/${driveFile.id}/view`, fileName: driveFile.name, mimeType: media.mimeType, fileSize: media.fileSize, validation: media.validation });
+    await persistState(from, state);
     return true;
   } catch (error) {
-    await releaseMediaUploadClaim(from, fileId);
+    await releaseClaim(from, fileId);
     throw error;
   }
 }
@@ -428,6 +481,7 @@ export async function confirmRequest(from, state, assertClaimOwnership, services
     ...services,
   };
   const request = state.request;
+  assertRequestDocumentsHaveValidation(request);
   await assertClaimOwnership();
   let persistedConfirmationData = false;
   if (!request.applicationId) {
@@ -738,6 +792,7 @@ export default async function handler(req, res) {
       }
       state.stage = "MAIN_MENU";
     }
+    if (await restartRequestWithUnvalidatedDocuments(from, state)) return res.status(200).send("EVENT_RECEIVED");
     if (!text && !buttonId && !fileId) {
       if (state.stage === "MULTI_APPLICANT_INCLUDED" || state.stage === "MULTI_SAVED_DOCUMENTS_DECISION") {
         await repeatCurrentPrompt(from, state);
@@ -796,7 +851,12 @@ export default async function handler(req, res) {
     if (state.stage === "RETURNING_CHOICE") {
       const profile = state.request.profile;
       if (!profile) { state.stage = "IDENTIFICATION"; await saveUserState(from, state); await sendText(from, "Для ідентифікації заявника вкажіть, будь ласка, ваше ПІБ."); return res.status(200).send("EVENT_RECEIVED"); }
-      if (buttonId === "use_saved_data") { state.request.type = "individual"; state.request.data = { ...(profile.data || {}), phone: from }; state.request.documents = JSON.parse(JSON.stringify(profile.documents || {})); state.request.documentIndex = 0; state.request.savedDocumentsUpdatedAt = profile.lastDocumentsUpdatedAt; state.request.usingSavedData = true; state.stage = "REQUEST_TYPE"; await saveUserState(from, state); await sendText(from, "Збережені дані використано. Тепер напишіть, будь ласка, який саме запит ви хочете подати."); return res.status(200).send("EVENT_RECEIVED"); }
+      if (buttonId === "use_saved_data") {
+        const reuse = prepareSavedDocumentsForReuse(profile.documents);
+        state.request.type = "individual"; state.request.data = { ...(profile.data || {}), phone: from }; state.request.documents = reuse.documents; state.request.documentIndex = 0; state.request.savedDocumentsUpdatedAt = profile.lastDocumentsUpdatedAt; state.request.usingSavedData = true; state.request.legacyDocumentsRequireUpload = reuse.legacyDocumentsRequireUpload; state.stage = "REQUEST_TYPE"; await saveUserState(from, state);
+        if (state.request.legacyDocumentsRequireUpload) await sendText(from, "Збережені раніше документи не мають нової перевірки безпеки, тому їх потрібно завантажити повторно. Збережені контактні дані залишаться доступними.");
+        await sendText(from, "Збережені дані використано. Тепер напишіть, будь ласка, який саме запит ви хочете подати."); return res.status(200).send("EVENT_RECEIVED");
+      }
       if (buttonId === "enter_data_again") { state.request = { type: "individual", data: { phone: from }, documents: {}, documentIndex: 0 }; state.stage = "IDENTIFICATION"; await saveUserState(from, state); await sendText(from, "Введіть, будь ласка, ПІБ заново."); return res.status(200).send("EVENT_RECEIVED"); }
       await sendReturningApplicantMenu(from, profile.lastDocumentsUpdatedAt); return res.status(200).send("EVENT_RECEIVED");
     }
@@ -845,7 +905,15 @@ export default async function handler(req, res) {
     if (state.stage === "DOCUMENTS") {
       const doc = currentDoc(state); if (!doc) { await askDocument(from, state); return res.status(200).send("EVENT_RECEIVED"); }
       const store = activeDocumentStore(state); const multiContext = state.request.multiPackage ? { beneficiaryIndex: state.request.currentBeneficiaryIndex, documentKey: doc.key } : null;
-      if (fileId) { const uploaded = await saveIncomingDocument(from, state, message, fileId, doc); if (!uploaded) return res.status(200).send("EVENT_RECEIVED"); await sendDocumentDone(from, doc.label, Boolean(doc.optional), multiContext); return res.status(200).send("EVENT_RECEIVED"); }
+      if (fileId) {
+        try {
+          const uploaded = await saveIncomingDocument(from, state, message, fileId, doc); if (!uploaded) return res.status(200).send("EVENT_RECEIVED"); await sendDocumentDone(from, doc.label, Boolean(doc.optional), multiContext);
+        } catch (error) {
+          if (!(error instanceof MediaValidationError)) throw error;
+          await sendText(from, error.userMessage);
+        }
+        return res.status(200).send("EVENT_RECEIVED");
+      }
       const parsedButton = state.request.multiPackage ? parseMultiDocumentButton(buttonId) : null;
       if (state.request.multiPackage && buttonId?.startsWith("document_") && (!parsedButton || parsedButton.beneficiaryIndex !== state.request.currentBeneficiaryIndex || parsedButton.documentKey !== doc.key)) return res.status(200).send("EVENT_RECEIVED");
       const donePressed = state.request.multiPackage ? parsedButton?.action === "done" : buttonId === "document_done";

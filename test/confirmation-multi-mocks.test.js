@@ -295,6 +295,14 @@ function driveMock(initialFiles = []) {
   };
 }
 
+const testMediaValidation = {
+  version: 1,
+  mimeType: "image/jpeg",
+  extension: ".jpg",
+  size: 100,
+  sha256: "a".repeat(64),
+};
+
 const reusedDocument = {
   fileName: "passport.jpg",
   sourceDriveFileId: "canonical-source",
@@ -302,6 +310,7 @@ const reusedDocument = {
   driveFileId: null,
   driveUrl: null,
   reusedFromApplicantProfile: true,
+  validation: testMediaValidation,
 };
 
 test("partial Drive-copy retry reuses the marked copy and never mutates its source", async () => {
@@ -411,8 +420,8 @@ function multiConfirmationState() {
       refreshApplicantProfileDocuments: true,
       data: { name: "Applicant", phone: "380000000008" },
       beneficiaries: [
-        { name: "Applicant", phone: "380000000008", isApplicant: true, documents: { passport: [{ driveFileId: "app-passport", fileName: "passport.jpg" }] } },
-        { name: "Other", phone: "380000000009", documents: { passport: [{ driveFileId: "other-passport", fileName: "passport.jpg" }] } },
+        { name: "Applicant", phone: "380000000008", isApplicant: true, documents: { passport: [{ driveFileId: "app-passport", fileName: "passport.jpg", validation: testMediaValidation }] } },
+        { name: "Other", phone: "380000000009", documents: { passport: [{ driveFileId: "other-passport", fileName: "passport.jpg", validation: testMediaValidation }] } },
       ],
       beneficiaryCount: 2,
     },
@@ -700,7 +709,7 @@ test("military confirmation retains Sheets-Drive-links-profile-success-reset ord
       type: "military_unit",
       multiPackage: false,
       data: { name: "Contact", militaryUnitNumber: "A123" },
-      documents: { official_request: [{ driveFileId: "official" }] },
+      documents: { official_request: [{ driveFileId: "official", validation: testMediaValidation }] },
     },
   };
   const effects = [];
