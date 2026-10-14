@@ -17,7 +17,8 @@ local VS Code → checks → commit → push main → Vercel deployment
 - `api/webhook.js` — Vercel webhook, Meta verification, WhatsApp state machine, документи, delivery і confirmation.
 - `lib/whatsapp.js` — WhatsApp Cloud API `v26.0`, текстові та інтерактивні повідомлення.
 - `lib/state.js` — Redis state, незалежні профілі фізосіб і відповідальних осіб ВЧ, counters та idempotency claims.
-- `lib/meta-media.js` — завантаження WhatsApp media у `Buffer`.
+- `lib/meta-media.js` — bounded streaming download WhatsApp media, перевірки Meta/HTTP metadata та передача `Buffer` у validation pipeline.
+- `lib/media-validation.js` — централізована MIME/structure/size validation, canonical extension і validation metadata для media documents.
 - `lib/google-drive.js` — OAuth2 Google Drive, папки, document uploads і post-confirm finalization документів ВЧ та multi-заявок фізосіб.
 - `lib/google-sheets.js` — monthly operator spreadsheets, single rows, multi master/detail blocks, statuses, clickable request IDs, rich-text document links і request-card lookup.
 - `api/request-card.js` — HMAC-захищена printable HTML-картка запиту.
@@ -45,6 +46,18 @@ Vercel Hobby дозволяє не більше 12 Serverless Functions у deplo
 Для змінених JavaScript-файлів запускати `node --check`; для поведінкових змін — `node --test` або релевантний production-oriented test file; перед передачею роботи — `git diff --check` і перегляд фактичного diff. Тести мають викликати production functions через контрольовані mocks і не повинні звертатися до production Redis, Google Drive, Google Sheets або WhatsApp API. Не вважати mock-тест доказом реальної доставки зовнішнім API.
 
 WhatsApp interactive reply buttons мають містити 1–3 кнопки. Для більшої кількості варіантів використовувати list message: не більше 10 rows сумарно, короткі унікальні row IDs, button text до 20 символів і row/section titles до 24 символів. `sendEditMenu()` використовує list із 5–6 rows; webhook повинен зберігати підтримку `interactive.list_reply.id`, `interactive.button_reply.id` і legacy `button.payload`.
+
+### Secure Media Upload
+
+Усі нові WhatsApp media uploads мають проходити єдиним шляхом: `downloadWhatsAppMedia()` у `lib/meta-media.js` → `validateMediaBuffer()` у `lib/media-validation.js` → `saveIncomingDocument()` в `api/webhook.js` → `uploadBufferToDrive()`. Не створювати альтернативний шлях до Google Drive upload в обхід validation pipeline.
+
+- Дозволені лише `image/jpeg`, `image/png`, `image/heic`, `image/heif` і `application/pdf`; єдиний ліміт `MAX_MEDIA_SIZE_BYTES` — 5 MiB (`5 * 1024 * 1024`).
+- Не довіряти filename extension, заявленому Meta MIME або HTTP `Content-Type` без перевірки фактичного вмісту. Drive filename повинен отримувати canonical extension із результату validation.
+- Не використовувати необмежений `response.arrayBuffer()` для media downloads: зберігати bounded streaming, перевірки Meta `file_size`, HTTP `Content-Length` і фактичного розміру.
+- Не дозволяти legacy/unvalidated documents проходити confirmation, finalization або saved-document reuse. Зберігати fail-closed інваріанти `requestDocumentsHaveValidation()`, `assertRequestDocumentsHaveValidation()` і `restartRequestWithUnvalidatedDocuments()` для single, multi та military flows.
+- Не змінювати validation metadata schema (`version`, MIME, extension, size, SHA-256 і dimensions там, де підтримуються) без regression tests для intake, Redis restore, saved documents і confirmation.
+- При зміні document prompts перевіряти всі п'ять первинних і повторних підказок, включно з `repeatCurrentPrompt()` після `/menu`; текст має зберігати ліміт 5 МБ.
+- Відхилений файл не повинен потрапляти в Drive або `request.documents`; поточний document stage має залишатися доступним для повторного завантаження. Не послаблювати повторну fail-closed перевірку безпосередньо перед confirmation side effects.
 
 ### Confirmation flow
 

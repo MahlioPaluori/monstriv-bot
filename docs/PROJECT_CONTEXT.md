@@ -17,7 +17,8 @@ Monstriv Bot — WhatsApp-бот для структурованого збор�
 - `api/webhook.js` — GET verification і POST webhook Meta WhatsApp, state machine, navigation, document intake та confirmation lifecycle.
 - `lib/whatsapp.js` — WhatsApp Cloud API `v26.0`, text, reply-button і list messages.
 - `lib/state.js` — Redis state/profile helpers, monthly counters, media/document claims, confirmation та Sheets writer leases.
-- `lib/meta-media.js` — отримання WhatsApp media як `Buffer`.
+- `lib/meta-media.js` — bounded streaming download WhatsApp media з перевірками Meta/HTTP metadata та контролем розміру.
+- `lib/media-validation.js` — централізована MIME/structure/size validation, canonical extension і validation metadata.
 - `lib/google-drive.js` — OAuth2 Drive client, папки, uploads, move/rename та idempotent copies.
 - `lib/google-sheets.js` — monthly spreadsheets, single/multi writer, rich-text links, grouping і read-only request lookup.
 - `api/request-card.js` — HMAC-захищена printable HTML-картка, дані для якої читаються з Sheets.
@@ -95,7 +96,7 @@ request.beneficiaries = [{ name, phone, documents, documentIndex }]
 
 Multi edit stages: `EDIT_BENEFICIARY_SELECT`, `EDIT_BENEFICIARY_FIELD`, `EDIT_BENEFICIARY_TEXT`; підтримано зміну beneficiary name/phone. Зміна count, додавання/видалення beneficiaries і заміна documents через edit menu не реалізовані.
 
-Документи фізособи збираються послідовно: `passport`, `rnokpp`, `military_id`, необов'язковий `ubd`. Для кожного типу підтримано один або кілька WhatsApp `image`/`document`. Кнопка «Готово» переходить далі лише після щонайменше одного файла; УБД можна пропустити до або після завантаження. Single використовує generic `document_done`/`document_skip`; multi — context-aware `document_done_<beneficiaryIndex>_<docKey>` і `document_skip_<beneficiaryIndex>_<docKey>`. Multi ack/sequence scope містить beneficiary index + document key; stale/malformed buttons не просувають flow, а beneficiary name/phone не є Redis identity.
+Документи фізособи збираються послідовно: `passport`, `rnokpp`, `military_id`, необов'язковий `ubd`. Для кожного типу підтримано один або кілька WhatsApp `image`/`document`, але вміст допускається лише згідно з політикою Secure Media Upload нижче. Кнопка «Готово» переходить далі лише після щонайменше одного файла; УБД можна пропустити до або після завантаження. Single використовує generic `document_done`/`document_skip`; multi — context-aware `document_done_<beneficiaryIndex>_<docKey>` і `document_skip_<beneficiaryIndex>_<docKey>`. Multi ack/sequence scope містить beneficiary index + document key; stale/malformed buttons не просувають flow, а beneficiary name/phone не є Redis identity.
 
 Ролі строго розділені:
 
@@ -105,9 +106,30 @@ Multi edit stages: `EDIT_BENEFICIARY_SELECT`, `EDIT_BENEFICIARY_FIELD`, `EDIT_BE
 
 Beneficiary phone required і validated, але не використовується для profile lookup/save та не створює beneficiary profile. Якщо колишній beneficiary пізніше звернеться зі свого WhatsApp `from` без existing applicant profile, він проходить new applicant flow і завантажує documents заново.
 
-Для returning applicant за WhatsApp phone існує persistent Redis profile. Бот пропонує «Збережені дані» або «Ввести заново». При single повторно використовуються profile data і documents; якщо documents старші за 365 днів, користувач може залишити їх або завантажити актуальні.
+Для returning applicant за WhatsApp phone існує persistent Redis profile. Бот пропонує «Збережені дані» або «Ввести заново». При single повторно використовуються profile data і лише валідовані documents; якщо documents старші за 365 днів, користувач може залишити їх або завантажити актуальні. Legacy saved documents без актуальної validation metadata не використовуються: бот просить завантажити пакет повторно.
 
 У multi-flow після вибору «Збережені дані», кількості осіб і наявності повного saved package бот питає, чи входить applicant до числа beneficiaries. Якщо ні — всі packages збираються заново. Якщо так — applicant стає beneficiary №1 (`isApplicant: true`): актуальні saved documents копіюються після confirmation в application-specific files, а оригінальні canonical profile files не переміщуються й не перейменовуються. Для documents старших за 365 днів окремий multi-stage пропонує `multi_saved_use` або `multi_saved_replace`. У replace-path новий package applicant після успішного confirmation копіюється в стабільні canonical files і оновлює лише applicant profile; documents інших beneficiaries ніколи не стають profile documents. Якщо попереднього profile немає, звичайний multi не створює misleading saved-document profile з beneficiary documents.
+
+### Secure Media Upload
+
+Secure Media Upload завершено, опубліковано й успішно перевірено в production. Єдина allowlist-політика в `lib/media-validation.js`:
+
+- JPEG — `image/jpeg`;
+- PNG — `image/png`;
+- HEIC — `image/heic`;
+- HEIF — `image/heif`;
+- PDF — `application/pdf`;
+- максимальний розмір кожного файла — 5 MiB (`5 * 1024 * 1024` байтів).
+
+`downloadWhatsAppMedia()` у `lib/meta-media.js` перевіряє MIME і `file_size` з Meta media metadata, HTTP `Content-Type`/`Content-Length`, завантажує response bounded stream та контролює фактичний розмір. Не використовується необмежений `response.arrayBuffer()`. Після download `validateMediaBuffer()` перевіряє заявлений MIME і фактичну структуру JPEG, PNG, ISO BMFF HEIC/HEIF або PDF. Filename extension не є джерелом довіри: validation повертає canonical extension для Drive filename.
+
+У document metadata зберігається validation object: `version`, canonical MIME, extension, size, SHA-256 і dimensions для форматів, де їх підтримано. Некоректний або завеликий файл відхиляється до Google Drive upload, не додається до Redis documents і надалі не потрапляє в Sheets. Поточний document stage зберігається, тому користувач може надіслати коректний файл повторно.
+
+Fail-closed захист діє у двох точках: `restartRequestWithUnvalidatedDocuments()` централізовано перевіряє документи одразу після читання Redis state, а `assertRequestDocumentsHaveValidation()` повторює перевірку безпосередньо перед confirmation/finalization side effects. Це охоплює individual single, individual multi та military flows, retries і saved-document reuse. Legacy Redis states або saved documents без нової validation metadata не мігруються і не копіюються: поточна тестова заявка безпечно перезапускається на збір даних/документів, а користувачу пояснюється потреба повторного завантаження.
+
+Усі п'ять document prompts — паспорт, РНОКПП, військово-обліковий документ, посвідчення УБД та офіційний лист ВЧ — повідомляють про ліміт 5 МБ. Ті самі prompts використовуються при повторному показі кроку, зокрема після `/menu` → `resume_request`.
+
+Під час завершення задачі автоматичний suite пройшов 68/68 тестів; Secure Media Upload окремо успішно перевірено в production. Старі тестові заявки не потребують міграції, додаткове очищення Redis або Google Drive не планується.
 
 ### Військова частина
 
@@ -214,9 +236,9 @@ root/
 
 Після fix `5434e56` нові multi uploads одразу потрапляють у nested applicant/beneficiary folders. Попередня collection поведінка створювала зайві root-level `ФІЗ/<beneficiary> — Особа N/`; нові такі folders більше не створюються. Legacy folders глобально автоматично не скануються й не мігруються.
 
-Приклади тимчасових upload-назв: `passport1.jpg`, `rnokpp1.pdf`, `military_id1.jpg`, `ubd1.jpg`, `official_request1.pdf`. Для `document` розширення береться з filename; інакше визначається з MIME type або є `.bin`. Імена папок і файлів санітизуються.
+Приклади тимчасових upload-назв: `passport1.jpg`, `rnokpp1.pdf`, `military_id1.jpg`, `ubd1.jpg`, `official_request1.pdf`. Розширення береться з canonical validation result, а не з недовіреного filename. Імена папок і файлів санітизуються.
 
-У `request.documents.<documentKey>[]` зберігаються `mediaId`, WhatsApp type, `receivedAt`, `driveFileId`, `driveUrl` і `fileName`.
+У `request.documents.<documentKey>[]` зберігаються `mediaId`, WhatsApp type, `receivedAt`, `driveFileId`, `driveUrl`, `fileName`, canonical `mimeType`, `fileSize` і validation metadata.
 
 Для multi ті самі metadata зберігаються у `request.beneficiaries[i].documents.<documentKey>[]`.
 
@@ -425,11 +447,12 @@ Operator handoff залишається high priority, але залежить �
 - редагування полів і збереження змін перевірені;
 - ВЧ-заявка зі збереженим canonical contact name працює;
 - ВЧ-заявка зі збереженим отримувачем працює;
-- ВЧ-заявка з іншим отримувачем працює.
+- ВЧ-заявка з іншим отримувачем працює;
+- Secure Media Upload успішно перевірено в production для актуального validation pipeline.
 
 ### Автоматизовані локальні перевірки
 
-На актуальному HEAD перед цим documentation update `node --test` проходив 49/49 тестів. Suite включає confirmation claims/lifecycle, application ID allocation, Drive-copy idempotency mocks, Sheets writer/master-detail recovery, edit-menu list payload і navigation recovery. Це mock/local coverage, а не підтвердження доступності чи exactly-once поведінки зовнішніх сервісів.
+На момент завершення Secure Media Upload `node --test` проходив 68/68 тестів. Suite включає media validation і bounded download, legacy Redis-state safeguards, document prompts, confirmation claims/lifecycle, application ID allocation, Drive-copy idempotency mocks, Sheets writer/master-detail recovery, edit-menu list payload і navigation recovery. Це mock/local coverage, а не підтвердження доступності чи exactly-once поведінки зовнішніх сервісів; production-перевірка Secure Media Upload зафіксована окремо вище.
 
 Інші сценарії не слід вважати ручно перевіреними лише на підставі коду або mock-тестів.
 
@@ -451,6 +474,9 @@ Operator handoff залишається high priority, але залежить �
 5. ФІЗ Drive folders групуються за ПІБ: різні люди з однаковим ПІБ потенційно можуть потрапити в одну папку.
 6. Legacy root-level `ФІЗ/<beneficiary> — Особа N/` folders не мігруються автоматично; нові uploads їх не створюють.
 7. В `OPERATOR` немає реальної черги або inbox integration.
+8. Структурна перевірка дозволених media formats не замінює антивірусне сканування.
+9. Приймання HEIC/HEIF залежить від фактичної підтримки цих media formats у Meta WhatsApp Cloud API; валідатор перевіряє ISO BMFF container/brands, але не декодує зображення повністю.
+10. PDF validation перевіряє структуру й відхиляє відомі небезпечні конструкції, але не є повноцінним malware scanner або Content Disarm and Reconstruction (CDR).
 
 ## Environment variables
 
@@ -467,7 +493,7 @@ Operator handoff залишається high priority, але залежить �
 Актуальний code HEAD перед локальним documentation update:
 
 ```text
-d264820 fix: use WhatsApp list for request editing menu
+889f7d4 security: validate WhatsApp media uploads and enforce file limits
 ```
 
-Останні milestones: multi saved-applicant document reuse і safe confirmation (`c24a2e9`), Kyiv monthly application IDs (`a96ab97`), Redis-serialized explicit-range Sheets writer (`2f57721`), suppression conflicting confirmation messages (`ff0dffb`) та WhatsApp list edit menu (`d264820`). Раніше реалізовано military contact profile, clickable request-card IDs, first-contact UX, military Drive/Sheets finalization, individual multi flow, printable multi request card і Meta Embedded Signup callback.
+Останні milestones: multi saved-applicant document reuse і safe confirmation (`c24a2e9`), Kyiv monthly application IDs (`a96ab97`), Redis-serialized explicit-range Sheets writer (`2f57721`), suppression conflicting confirmation messages (`ff0dffb`), WhatsApp list edit menu (`d264820`) та Secure Media Upload із legacy-state fail-closed enforcement (`889f7d4`). Раніше реалізовано military contact profile, clickable request-card IDs, first-contact UX, military Drive/Sheets finalization, individual multi flow, printable multi request card і Meta Embedded Signup callback.
