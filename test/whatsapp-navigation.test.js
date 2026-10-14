@@ -27,7 +27,7 @@ async function captureApplicantTypeMenu() {
 }
 
 test("applicant type menu includes navigation guidance whenever a request starts", async () => {
-  const expectedText = "Хто подає запит?\n\n💡 Навігація: під час заповнення заявки надішліть /menu, щоб відкрити меню, де можна продовжити або скасувати поточну заявку.\n\nВведені дані не видаляються, доки ви не підтвердите скасування.";
+  const expectedText = "Хто подає запит?\n\n💡 Навігація: під час заповнення заявки надішліть команду /menu, щоб відкрити меню, де можна продовжити або скасувати поточну заявку.\n\nВведені дані не видаляються, доки ви не підтвердите скасування.";
 
   for (const payload of [await captureApplicantTypeMenu(), await captureApplicantTypeMenu()]) {
     assert.equal(payload.type, "interactive");
