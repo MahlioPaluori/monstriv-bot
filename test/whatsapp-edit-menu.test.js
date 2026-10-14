@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyEditedField, getInteractiveReplyId, repeatCurrentPrompt } from "../api/webhook.js";
+import { applyEditedField, getInteractiveReplyId, openEditMenu, repeatCurrentPrompt } from "../api/webhook.js";
 import { sendEditMenu } from "../lib/whatsapp.js";
 
 async function captureEditMenu(type, multiPackage = false) {
@@ -77,6 +77,34 @@ test("list reply IDs use the existing callback normalization", () => {
   assert.equal(getInteractiveReplyId({ interactive: { list_reply: { id: "edit_need" } } }), "edit_need");
   assert.equal(getInteractiveReplyId({ interactive: { button_reply: { id: "edit_name" } } }), "edit_name");
   assert.equal(getInteractiveReplyId({ button: { payload: "edit_city" } }), "edit_city");
+});
+
+test("confirmation edit callback enters EDIT_MENU without losing request data", async () => {
+  const calls = [];
+  const state = {
+    stage: "CONFIRMATION",
+    request: {
+      type: "individual",
+      multiPackage: false,
+      applicationId: "2026-10-0042",
+      data: { name: "Saved name", need: "Saved need" },
+      documents: { passport: [{ driveFileId: "file-1" }] },
+    },
+  };
+
+  await openEditMenu("phone", state, {
+    saveUserState: async (from, current) => { calls.push(["save", from, current.stage]); },
+    sendEditMenu: async (...args) => { calls.push(["menu", ...args]); },
+  });
+
+  assert.equal(state.stage, "EDIT_MENU");
+  assert.equal(state.request.applicationId, "2026-10-0042");
+  assert.equal(state.request.data.need, "Saved need");
+  assert.equal(state.request.documents.passport[0].driveFileId, "file-1");
+  assert.deepEqual(calls, [
+    ["save", "phone", "EDIT_MENU"],
+    ["menu", "phone", "individual", false],
+  ]);
 });
 
 test("editing a field returns the request to confirmation without losing its data", async () => {

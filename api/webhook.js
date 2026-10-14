@@ -392,6 +392,15 @@ export async function applyEditedField(from, state, text, services = {}) {
   const returnToConfirmation = services.showConfirmation || showConfirmation;
   return returnToConfirmation(from, state);
 }
+
+export async function openEditMenu(from, state, services = {}) {
+  const persistState = services.saveUserState || saveUserState;
+  const showEditMenu = services.sendEditMenu || sendEditMenu;
+  state.stage = "EDIT_MENU";
+  await persistState(from, state);
+  return showEditMenu(from, state.request.type, state.request.multiPackage);
+}
+
 async function allocateNextApplicationId(assertClaimOwnership) {
   const period = getKyivApplicationPeriod();
   await assertClaimOwnership();
@@ -850,7 +859,6 @@ export default async function handler(req, res) {
     if (state.stage === "RECIPIENT_NAME" && text) { state.request.data.recipientName = text; state.stage = "RECIPIENT_PHONE"; await saveUserState(from, state); await sendText(from, "Вкажіть, будь ласка, номер телефону іншого отримувача."); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "RECIPIENT_PHONE" && text) { state.request.data.recipientPhone = text; await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); }
 
-    if (state.stage === "CONFIRMATION" && buttonId === "edit_request") { state.stage = "EDIT_MENU"; await saveUserState(from, state); await sendEditMenu(from, state.request.type, state.request.multiPackage); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_MENU") {
       const prompts = { edit_name: "name", edit_need: "need", edit_unit_number: "militaryUnitNumber", edit_city: "city", edit_np: "novaPoshtaBranch" };
       if (buttonId === "edit_recipient") { state.stage = "EDIT_RECIPIENT_CHOICE"; await saveUserState(from, state); await sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "edit_recipient_other_yes", "edit_recipient_other_no"); return res.status(200).send("EVENT_RECEIVED"); }
@@ -874,16 +882,13 @@ export default async function handler(req, res) {
           confirmationLog("confirmation_handler_failed", state.request, { errorCode: error?.code || "UNKNOWN" });
         }
       } else if (buttonId === "edit_request") {
-        state.stage = "EDIT_MENU";
-        await saveUserState(from, state);
-        await sendEditMenu(from, state.request.type, state.request.multiPackage);
+        await openEditMenu(from, state);
       } else {
         await repeatCurrentPrompt(from, state);
       }
       return res.status(200).send("EVENT_RECEIVED");
     }
     if (state.stage === "OPERATOR") return res.status(200).send("EVENT_RECEIVED");
-    if (state.stage === "CONFIRMED") { await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
     await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
   } catch (error) {
     console.error("Webhook error:", error);

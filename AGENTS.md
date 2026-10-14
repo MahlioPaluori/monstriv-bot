@@ -21,7 +21,6 @@ local VS Code → checks → commit → push main → Vercel deployment
 - `lib/google-drive.js` — OAuth2 Google Drive, папки, document uploads і post-confirm finalization документів ВЧ та multi-заявок фізосіб.
 - `lib/google-sheets.js` — monthly operator spreadsheets, single rows, multi master/detail blocks, statuses, clickable request IDs, rich-text document links і request-card lookup.
 - `api/request-card.js` — HMAC-захищена printable HTML-картка запиту.
-- `api/request-card-links-test.js` — тимчасовий, наразі збережений для тестування endpoint міграції clickable request IDs у current monthly spreadsheet.
 - `api/meta/oauth-callback.js` — callback Meta-hosted Embedded Signup OAuth: приймає `code` або повідомляє про OAuth error; не обмінює code на токени й не змінює bot state.
 
 Основні інтеграції: WhatsApp Cloud API, Redis, Google Drive API, Google Sheets API, Vercel і GitHub. State не можна тримати лише в пам'яті процесу: Vercel виконує незалежні serverless-запити.
@@ -78,11 +77,9 @@ Drive hierarchy не змішувати: ВЧ — `ВЧ/<номер ВЧ>/<ПІ�
 
 Military та individual profiles мають окремі Redis keys і не перезаписують один одного. Returning military contact автоматично використовує canonical ПІБ і все одно щоразу вводить номер ВЧ; фінальний підтверджений `edit_name` оновлює canonical profile.
 
-У Sheets visible значення колонки B залишається exact `applicationId`, але є clickable signed request-card link. Не дублювати signing logic поза `buildRequestCardUrl()`.
+У Sheets visible значення колонки B залишається exact `applicationId`, але production writer автоматично додає clickable signed request-card link для кожної нової заявки. Не дублювати signing logic поза `buildRequestCardUrl()`.
 
 `applicationId` має формат `YYYY-MM-NNNN`, де `YYYY-MM` фіксується один раз за `Europe/Kyiv` перед первинною генерацією, а `NNNN` — місячна послідовність `0001`–`9999`. Redis key: `requests:counter:YYYY-MM`. Перед атомарним виділенням номера враховується максимальний уже записаний sequence у всіх однойменних місячних spreadsheets; retry завжди використовує стабільний ID зі state. Sheets lookup перевіряє лише місяць, закодований в ID, обидві request-вкладки та всі однойменні spreadsheet-файли.
-
-`api/request-card-links-test.js` — temporary repair endpoint, currently retained для відновлення clickable request-card links у вже існуючих Sheets rows; не видаляти випадково. Поточну роботу над production WhatsApp Business App + Cloud API Coexistence не змінювати без окремого запиту: onboarding ще не завершений.
 
 `api/meta/oauth-callback.js` потрібен для Meta-hosted Embedded Signup. Не додавати до нього token exchange, збереження OAuth code або зміну WhatsApp/webhook flow без окремо погодженої задачі.
 
@@ -97,7 +94,7 @@ Military та individual profiles мають окремі Redis keys і не п�
 - WhatsApp: `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN`, `WEBHOOK_VERIFY_TOKEN`.
 - Redis: `REDIS_URL`.
 - Google: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_DRIVE_ROOT_FOLDER_ID`.
-- Request card: `REQUEST_CARD_SIGNING_SECRET`, `REQUEST_CARD_TEST_SECRET`.
+- Request card: `REQUEST_CARD_SIGNING_SECRET`.
 - `VERCEL_PROJECT_PRODUCTION_URL` — Vercel system environment variable для canonical production URL; це не secret і його не потрібно вручну зберігати в репозиторії.
 
 Не змінювати Vercel configuration, secrets або environment variables без явного запиту користувача.

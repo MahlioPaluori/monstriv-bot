@@ -21,7 +21,6 @@ Monstriv Bot — WhatsApp-бот для структурованого збор�
 - `lib/google-drive.js` — OAuth2 Drive client, папки, uploads, move/rename та idempotent copies.
 - `lib/google-sheets.js` — monthly spreadsheets, single/multi writer, rich-text links, grouping і read-only request lookup.
 - `api/request-card.js` — HMAC-захищена printable HTML-картка, дані для якої читаються з Sheets.
-- `api/request-card-links-test.js` — тимчасовий захищений maintenance endpoint для відновлення clickable IDs у current monthly spreadsheet.
 - `api/meta/oauth-callback.js` — обмежений callback Embedded Signup без token exchange.
 - `test/*.test.js` — локальні production-function tests із mocks; реальні Google/Redis/WhatsApp ресурси не використовуються.
 
@@ -332,7 +331,7 @@ E beneficiary name | F beneficiary phone |
 G passport | H rnokpp | I military_id | J ubd або blank | K:O blank
 ```
 
-Detail document cells показують filenames із окремими clickable Drive rich-text links для кожного файла. Тільки master B має real `applicationId` і request-card link. `Особа N` не є application ID, не підписується, не використовується для duplicate lookup і maintenance endpoint пропускає такі labels.
+Detail document cells показують filenames із окремими clickable Drive rich-text links для кожного файла. Тільки master B має real `applicationId` і request-card link. `Особа N` не є application ID, не підписується й не використовується для duplicate lookup.
 
 Master + details первинно записуються одним explicit matrix write. Retry шукає exact master `applicationId` у B, не створює duplicate master, може дозаповнити відсутній suffix detail block, повторно застосовує rich-text/master link і перевіряє grouping без збільшення depth. Неконсистентний detail block дає safe error без перезапису сусідньої заявки. `sheetsRecorded: true` встановлюється лише після rows, formatting, clickable master ID і grouping.
 
@@ -357,7 +356,7 @@ Security:
 
 Signed URL є permanent bearer link: той, хто отримав URL, може відкрити картку.
 
-Lookup read-only, не викликає `getOrCreateCurrentMonthSpreadsheet()`. Період береться безпосередньо з `YYYY-MM` у ID; пошук охоплює всі spreadsheets з відповідною місячною назвою, обидва листи та exact значення у column B. `not_found` дає HTTP 404, справжній duplicate — 409, invalid data — 422, інтеграційна помилка — 500.
+Lookup read-only і не створює monthly spreadsheets. Період береться безпосередньо з `YYYY-MM` у ID; пошук охоплює всі spreadsheets з відповідною місячною назвою, обидва листи та exact значення у column B. `not_found` дає HTTP 404, справжній duplicate — 409, invalid data — 422, інтеграційна помилка — 500.
 
 Картка містить exact application ID, ПІБ, дату, номер ВЧ (лише для ВЧ), потребу, порожній блок «Комплектація / примітки», фактичного отримувача, телефон, місто та Нову пошту. Вона не показує Sheets status або Drive URLs.
 
@@ -374,16 +373,9 @@ Lookup read-only, не викликає `getOrCreateCurrentMonthSpreadsheet()`. 
 
 Для multi request-card lookup знаходить exact master `applicationId`, читає безпосередньо наступні `Особа 1`, `Особа 2`, … detail rows і відображає кожного beneficiary: index, ПІБ, phone та позначки наявності `passport`, `rnokpp`, `military_id`, `ubd`. Картка не показує самі filenames або Drive links.
 
-## TEMPORARY / CURRENTLY RETAINED FOR TESTING
+## COMPLETED MAINTENANCE
 
-`GET /api/request-card-links-test?token=<TEST_SECRET>`:
-
-- захищений тим самим `REQUEST_CARD_TEST_SECRET` через `timingSafeEqual`;
-- явно накладає clickable request-card links на valid IDs у колонці B обох листів current monthly spreadsheet;
-- пропускає вже правильні links і не змінює заявки чи інші колонки;
-- повертає лише лічильники `updated`, `alreadyCorrect`, `skipped`, без IDs, персональних даних або signed URLs.
-
-Цей endpoint наразі свідомо залишається як repair route для ширшого періоду тестування. Його cleanup буде окремим пізнішим рішенням; `REQUEST_CARD_TEST_SECRET` залишається актуальним environment variable.
+Тимчасовий endpoint міграції clickable request-card IDs видалено після завершення ручної міграції старих Sheets rows. Для нових single і multi заявок production Sheets writer автоматично додає signed request-card link до exact `applicationId` у master row; окремий repair route для цього не потрібен.
 
 ## CURRENT INFRASTRUCTURE: production WhatsApp / Coexistence
 
@@ -448,7 +440,6 @@ Operator handoff залишається high priority, але залежить �
 - inventory marker logic;
 - production WhatsApp Coexistence onboarding від правильної business entity;
 - реальна operator message queue / handoff після onboarding;
-- cleanup temporary request-card test endpoints пізніше;
 - conservative cleanup legacy root-level multi Drive folders лише за потреби та після dry-run.
 
 ## KNOWN RISKS
@@ -458,16 +449,15 @@ Operator handoff залишається high priority, але залежить �
 3. Окремого загального deduplication key для кожного WhatsApp message ID немає. Confirmation claim серіалізує confirm callbacks; media upload і document acknowledgement мають власні claims. Глобальна дедуплікація без crash-recovery дизайну могла б заблокувати законний retry.
 4. Permanent signed request-card URLs — bearer links без expiry або revocation per link.
 5. ФІЗ Drive folders групуються за ПІБ: різні люди з однаковим ПІБ потенційно можуть потрапити в одну папку.
-6. Temporary `request-card-links-test` endpoint є bearer-token maintenance route і має бути видалений окремим рішенням після завершення тестування.
-7. Legacy root-level `ФІЗ/<beneficiary> — Особа N/` folders не мігруються автоматично; нові uploads їх не створюють.
-8. В `OPERATOR` немає реальної черги або inbox integration.
+6. Legacy root-level `ФІЗ/<beneficiary> — Особа N/` folders не мігруються автоматично; нові uploads їх не створюють.
+7. В `OPERATOR` немає реальної черги або inbox integration.
 
 ## Environment variables
 
 - WhatsApp: `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN`, `WEBHOOK_VERIFY_TOKEN`.
 - Redis: `REDIS_URL`.
 - Google: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_DRIVE_ROOT_FOLDER_ID`.
-- Request card: `REQUEST_CARD_SIGNING_SECRET`, `REQUEST_CARD_TEST_SECRET`.
+- Request card: `REQUEST_CARD_SIGNING_SECRET`.
 - Vercel system variable: `VERCEL_PROJECT_PRODUCTION_URL` для canonical production URL.
 
 Не записувати значення secrets у код, Git або документацію.
