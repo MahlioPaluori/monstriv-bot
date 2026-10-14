@@ -58,13 +58,13 @@ const MILITARY_DOCUMENTS = [
 ];
 
 function documentStatus(documents, definition) {
-  if (Array.isArray(documents?.[definition.key]) && documents[definition.key].length > 0) return "Надано";
-  return definition.optional ? "Необов'язково / пропущено" : "Не надано";
+  if (Array.isArray(documents?.[definition.key]) && documents[definition.key].length > 0) return "✓";
+  return definition.optional ? "—" : "✕";
 }
 
 function documentStatusLine(documents, definitions) {
   return definitions
-    .map((definition) => `<span class="document-status-item"><strong>${escapeHtml(definition.label)}:</strong> ${escapeHtml(documentStatus(documents, definition))}</span>`)
+    .map((definition) => `<span class="document-status-item"><strong>${escapeHtml(definition.label)}:</strong> <span class="document-status-symbol">${escapeHtml(documentStatus(documents, definition))}</span></span>`)
     .join("");
 }
 
@@ -102,12 +102,25 @@ function errorPage(message) {
 
 export function requestCardPage(request) {
   const isMulti = request.type === "individual" && request.multiPackage === true;
-  const militaryUnit = request.type === "military_unit"
-    ? `<p class="unit"><strong>Військова частина:</strong> ${displayValue(request.militaryUnitNumber)}</p>`
+  const isMilitary = request.type === "military_unit";
+  const militaryUnitNumber = String(request.militaryUnitNumber || "").trim();
+  const militaryIdentity = isMilitary
+    ? `<div class="military-identity">
+        <p class="military-unit">ВІЙСЬКОВА ЧАСТИНА${militaryUnitNumber ? ` ${escapeHtml(militaryUnitNumber)}` : ""}</p>
+        <div class="military-contact">
+          <strong>Контактна особа</strong>
+          <span>${displayValue(request.personName)}</span>
+          ${request.mainPhone ? `<span>${escapeHtml(request.mainPhone)}</span>` : ""}
+        </div>
+      </div>`
     : "";
+  const personName = isMilitary ? "" : `<p class="name">${displayValue(request.personName)}</p>`;
   const multiApplicant = isMulti
     ? `<p class="applicant-label">Заявник · ${displayValue(request.mainPhone)}</p><p class="package-count">Кілька пакетів документів · ${request.beneficiaries.length} осіб</p>`
     : "";
+  const shippingPhone = isMilitary && !request.actualRecipientPhone
+    ? ""
+    : `<div class="shipping-row"><strong>Телефон:</strong> <span>${displayValue(request.actualRecipientPhone)}</span></div>`;
   const multiBeneficiaries = beneficiariesSection(request);
   const requestDocuments = documentsSection(request);
   return `<!doctype html>
@@ -128,7 +141,10 @@ export function requestCardPage(request) {
     .header h1 { margin: 0; font-size: 18pt; line-height: 1.15; letter-spacing: .01em; }
     .header .date { margin: 0; color: #555; font-size: 10pt; white-space: nowrap; }
     .header .name { margin: 8px 0 0; font-size: 14pt; font-weight: 700; line-height: 1.25; }
-    .header .unit { margin: 5px 0 0; color: #333; font-size: 11pt; }
+    .military-identity { margin-top: 10px; }
+    .military-unit { margin: 0; font-size: 15pt; font-weight: 700; line-height: 1.2; letter-spacing: .035em; overflow-wrap: anywhere; }
+    .military-contact { display: flex; flex-direction: column; align-items: flex-start; margin-top: 7px; padding-left: 9px; border-left: 3px solid #555; font-size: 10.5pt; line-height: 1.3; }
+    .military-contact strong { margin-bottom: 2px; font-size: 9pt; letter-spacing: .04em; text-transform: uppercase; }
     .header .applicant-label { margin: 3px 0 0; color: #444; font-size: 10.5pt; }
     .header .package-count { margin: 4px 0 0; color: #666; font-size: 9.5pt; }
     .section { margin-bottom: 14px; }
@@ -141,9 +157,11 @@ export function requestCardPage(request) {
     .beneficiary-summary { margin: 0 0 4px; overflow-wrap: anywhere; }
     .beneficiary-summary strong { color: #444; }
     .beneficiary-number { font-size: 10.5pt; letter-spacing: .04em; }
-    .document-status { margin: 0; border-top: 1px solid #ccc; padding-top: 4px; overflow-wrap: anywhere; }
-    .document-status-item { display: inline-block; margin: 0 14px 2px 0; }
-    .documents-box { border: 1px solid #999; padding: 7px 9px 5px; break-inside: avoid; page-break-inside: avoid; }
+    .document-status { margin: 0; border-top: 1px solid #ccc; padding-top: 3px; font-size: 9pt; line-height: 1.25; overflow-wrap: anywhere; }
+    .document-status-item { display: inline-block; margin: 0 10px 1px 0; }
+    .document-status-symbol { color: #111; font-family: "Segoe UI Symbol", "Arial Unicode MS", Arial, sans-serif; font-size: 10pt; font-weight: 700; }
+    .documents-section { margin-bottom: 10px; }
+    .documents-box { border: 1px solid #999; padding: 5px 7px 4px; break-inside: avoid; page-break-inside: avoid; }
     .documents-box .document-status { border-top: 0; padding-top: 0; }
     .notes { margin-bottom: 14px; }
     .notes-box { border: 1px solid #a8a8a8; padding: 0 12px; }
@@ -167,9 +185,9 @@ export function requestCardPage(request) {
         <h1>ЗАЯВКА № ${escapeHtml(request.applicationId)}</h1>
         <p class="date">Дата: ${displayValue(request.date)}</p>
       </div>
-      <p class="name">${displayValue(request.personName)}</p>
+      ${personName}
       ${multiApplicant}
-      ${militaryUnit}
+      ${militaryIdentity}
     </header>
     <section class="section need-section">
       <h2>ПОТРЕБА</h2>
@@ -184,7 +202,7 @@ export function requestCardPage(request) {
     <section class="shipping">
       <h2>ДАНІ ДЛЯ ВІДПРАВКИ</h2>
       <div class="shipping-row"><strong>Отримувач:</strong> <span>${displayValue(request.actualRecipientName)}</span></div>
-      <div class="shipping-row"><strong>Телефон:</strong> <span>${displayValue(request.actualRecipientPhone)}</span></div>
+      ${shippingPhone}
       <div class="shipping-row"><strong>Місто:</strong> <span>${displayValue(request.city)}</span></div>
       <div class="shipping-row"><strong>Нова пошта:</strong> <span>${displayValue(request.novaPoshtaBranch)}</span></div>
     </section>
