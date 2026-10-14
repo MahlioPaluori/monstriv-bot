@@ -42,12 +42,12 @@ import {
 } from "../lib/whatsapp.js";
 
 const PHYSICAL_DOCUMENTS = [
-  { key: "passport", label: "📕 Паспорт" },
-  { key: "rnokpp", label: "🪪 РНОКПП (ідентифікаційний код)" },
-  { key: "military_id", label: "🎖 Військовий квиток / посвідчення" },
-  { key: "ubd", label: "🏅 Посвідчення УБД", optional: true },
+  { key: "passport", label: "📕 Паспорт", uploadPrompt: "📸 Надішліть фото паспорта." },
+  { key: "rnokpp", label: "🪪 РНОКПП (ідентифікаційний код)", uploadPrompt: "📸 Надішліть фото РНОКПП (ідентифікаційного коду)." },
+  { key: "military_id", label: "🎖 Військовий квиток / посвідчення", uploadPrompt: "📸 Надішліть фото військово-облікового документа." },
+  { key: "ubd", label: "🏅 Посвідчення УБД", uploadPrompt: "📸 Надішліть фото посвідчення учасника бойових дій (УБД).", optional: true },
 ];
-const MILITARY_UNIT_DOCUMENTS = [{ key: "official_request", label: "📄 Офіційний запит" }];
+const MILITARY_UNIT_DOCUMENTS = [{ key: "official_request", label: "📄 Офіційний запит", uploadPrompt: "📸 Надішліть фото офіційного листа військової частини." }];
 const MAX_MULTI_BENEFICIARIES = 5;
 const REQUIRED_PHYSICAL_DOCUMENT_KEYS = PHYSICAL_DOCUMENTS.filter((doc) => !doc.optional).map((doc) => doc.key);
 const MENU_COMMANDS = new Set(["/menu", "меню", "/start", "start", "старт"]);
@@ -296,9 +296,9 @@ async function askDocument(from, state) {
   if (doc.optional) {
     const beneficiary = activeBeneficiary(state);
     const context = beneficiary ? { beneficiaryIndex: state.request.currentBeneficiaryIndex, documentKey: doc.key } : null;
-    return sendOptionalDocumentPrompt(from, doc.label, context);
+    return sendOptionalDocumentPrompt(from, doc.uploadPrompt, context);
   }
-  await sendText(from, `Будь ласка, надішліть ${doc.label}.\n\nМожна надіслати один або кілька файлів/фото цього документа. Після того як усе надіслано, натисніть «Готово».`);
+  await sendText(from, `${doc.uploadPrompt}\n\nМожна надіслати один або кілька файлів/фото цього документа. Після того як усе надіслано, натисніть «Готово».`);
 }
 function summary(state) {
   const r = state.request || {}, d = r.data || {};
@@ -850,7 +850,7 @@ export default async function handler(req, res) {
       if (state.request.multiPackage && buttonId?.startsWith("document_") && (!parsedButton || parsedButton.beneficiaryIndex !== state.request.currentBeneficiaryIndex || parsedButton.documentKey !== doc.key)) return res.status(200).send("EVENT_RECEIVED");
       const donePressed = state.request.multiPackage ? parsedButton?.action === "done" : buttonId === "document_done";
       const skipPressed = state.request.multiPackage ? parsedButton?.action === "skip" : buttonId === "document_skip";
-      if (donePressed) { const files = store.documents[doc.key] || []; if (!files.length) { await sendText(from, `Будь ласка, спочатку надішліть ${doc.label}.`); return res.status(200).send("EVENT_RECEIVED"); } store.documentIndex += 1; await saveUserState(from, state); await askDocument(from, state); return res.status(200).send("EVENT_RECEIVED"); }
+      if (donePressed) { const files = store.documents[doc.key] || []; if (!files.length) { await sendText(from, `Спочатку виконайте цей крок:\n\n${doc.uploadPrompt}`); return res.status(200).send("EVENT_RECEIVED"); } store.documentIndex += 1; await saveUserState(from, state); await askDocument(from, state); return res.status(200).send("EVENT_RECEIVED"); }
       if (skipPressed && doc.optional) { store.documentIndex += 1; await saveUserState(from, state); await askDocument(from, state); return res.status(200).send("EVENT_RECEIVED"); }
     }
     if (state.stage === "CITY" && text) { state.request.data.city = text; state.stage = "NOVA_POSHTA_BRANCH"; await saveUserState(from, state); await sendText(from, "Вкажіть, будь ласка, номер або адресу відділення Нової пошти."); return res.status(200).send("EVENT_RECEIVED"); }
