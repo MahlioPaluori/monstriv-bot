@@ -47,16 +47,25 @@ function displayValue(value) {
   return escapeHtml(value || "—");
 }
 
-function beneficiaryDocumentStatus(documents) {
-  const labels = [
-    ["passport", "Паспорт"],
-    ["rnokpp", "РНОКПП"],
-    ["military_id", "Військовий квиток"],
-    ["ubd", "УБД"],
-  ];
-  return labels
-    .map(([key, label]) => `${label} ${Array.isArray(documents?.[key]) && documents[key].length > 0 ? "✓" : "×"}`)
-    .join(", ");
+const PHYSICAL_DOCUMENTS = [
+  { key: "passport", label: "Паспорт" },
+  { key: "rnokpp", label: "РНОКПП" },
+  { key: "military_id", label: "Військово-обліковий документ" },
+  { key: "ubd", label: "Посвідчення УБД", optional: true },
+];
+const MILITARY_DOCUMENTS = [
+  { key: "official_request", label: "Офіційний лист військової частини" },
+];
+
+function documentStatus(documents, definition) {
+  if (Array.isArray(documents?.[definition.key]) && documents[definition.key].length > 0) return "Надано";
+  return definition.optional ? "Необов'язково / пропущено" : "Не надано";
+}
+
+function documentStatusLine(documents, definitions) {
+  return definitions
+    .map((definition) => `<span class="document-status-item"><strong>${escapeHtml(definition.label)}:</strong> ${escapeHtml(documentStatus(documents, definition))}</span>`)
+    .join("");
 }
 
 function beneficiariesSection(request) {
@@ -65,7 +74,7 @@ function beneficiariesSection(request) {
   const blocks = beneficiaries.map((beneficiary) => `
       <article class="beneficiary">
         <p class="beneficiary-summary"><strong class="beneficiary-number">ОСОБА ${escapeHtml(beneficiary.index)}</strong> · <strong>ПІБ:</strong> ${displayValue(beneficiary.name)} · <strong>Телефон:</strong> ${displayValue(beneficiary.phone)}</p>
-        <p class="document-status">${beneficiaryDocumentStatus(beneficiary.documents)}</p>
+        <p class="document-status">${documentStatusLine(beneficiary.documents, PHYSICAL_DOCUMENTS)}</p>
       </article>`).join("");
 
   return `
@@ -75,13 +84,23 @@ function beneficiariesSection(request) {
     </section>`;
 }
 
+function documentsSection(request) {
+  if (request.type === "individual" && request.multiPackage === true) return "";
+  const definitions = request.type === "military_unit" ? MILITARY_DOCUMENTS : PHYSICAL_DOCUMENTS;
+  return `
+    <section class="section documents-section">
+      <h2>ДОКУМЕНТИ</h2>
+      <div class="documents-box"><p class="document-status">${documentStatusLine(request.documents, definitions)}</p></div>
+    </section>`;
+}
+
 function errorPage(message) {
   return `<!doctype html>
 <html lang="uk"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Картка запиту</title></head>
 <body><main><h1>Картка запиту</h1><p>${escapeHtml(message)}</p></main></body></html>`;
 }
 
-function requestCardPage(request) {
+export function requestCardPage(request) {
   const isMulti = request.type === "individual" && request.multiPackage === true;
   const militaryUnit = request.type === "military_unit"
     ? `<p class="unit"><strong>Військова частина:</strong> ${displayValue(request.militaryUnitNumber)}</p>`
@@ -90,6 +109,7 @@ function requestCardPage(request) {
     ? `<p class="applicant-label">Заявник · ${displayValue(request.mainPhone)}</p><p class="package-count">Кілька пакетів документів · ${request.beneficiaries.length} осіб</p>`
     : "";
   const multiBeneficiaries = beneficiariesSection(request);
+  const requestDocuments = documentsSection(request);
   return `<!doctype html>
 <html lang="uk">
 <head>
@@ -122,6 +142,9 @@ function requestCardPage(request) {
     .beneficiary-summary strong { color: #444; }
     .beneficiary-number { font-size: 10.5pt; letter-spacing: .04em; }
     .document-status { margin: 0; border-top: 1px solid #ccc; padding-top: 4px; overflow-wrap: anywhere; }
+    .document-status-item { display: inline-block; margin: 0 14px 2px 0; }
+    .documents-box { border: 1px solid #999; padding: 7px 9px 5px; break-inside: avoid; page-break-inside: avoid; }
+    .documents-box .document-status { border-top: 0; padding-top: 0; }
     .notes { margin-bottom: 14px; }
     .notes-box { border: 1px solid #a8a8a8; padding: 0 12px; }
     .note-line { height: 11mm; border-bottom: 1px solid #b6b6b6; }
@@ -153,6 +176,7 @@ function requestCardPage(request) {
       <div class="need-box"><p class="need">${displayValue(request.need)}</p></div>
     </section>
     ${multiBeneficiaries}
+    ${requestDocuments}
     <section class="notes">
       <h2>КОМПЛЕКТАЦІЯ / ПРИМІТКИ</h2>
       <div class="notes-box"><div class="note-line"></div><div class="note-line"></div><div class="note-line"></div><div class="note-line"></div><div class="note-line"></div></div>
