@@ -293,6 +293,31 @@ function isMenuCommand(text) {
   return MENU_COMMANDS.has(String(text || "").trim().toLowerCase());
 }
 
+export async function handleDocumentStageFallback(from, state, input, services = {}) {
+  if (state.stage !== "DOCUMENTS") return false;
+  const { message, text, buttonId, fileId } = input;
+  if (!text && !buttonId && !fileId) {
+    const logUnsupported = services.logUnsupported || ((details) => console.info(JSON.stringify(details)));
+    logUnsupported({
+      messageId: message?.id || null,
+      messageType: message?.type || null,
+      stage: state.stage,
+      hasText: Boolean(text),
+      hasButtonId: Boolean(buttonId),
+      hasFileId: Boolean(fileId),
+    });
+    return true;
+  }
+  if (text && !isMenuCommand(text)) {
+    const notify = services.sendText || sendText;
+    const repeatPrompt = services.repeatCurrentPrompt || repeatCurrentPrompt;
+    await notify(from, "📸 Будь ласка, надішліть фото документа, а не його номер або текст.\n\nМи очікуємо саме фотографію документа. Також можна надіслати PDF-файл.");
+    await repeatPrompt(from, state);
+    return true;
+  }
+  return false;
+}
+
 function isValidButtonForStage(state, buttonId) {
   if (!buttonId) return true;
   const buttonsByStage = {
@@ -836,6 +861,7 @@ export default async function handler(req, res) {
       state.stage = "MAIN_MENU";
     }
     if (await restartRequestWithUnvalidatedDocuments(from, state)) return res.status(200).send("EVENT_RECEIVED");
+    if (await handleDocumentStageFallback(from, state, { message, text, buttonId, fileId })) return res.status(200).send("EVENT_RECEIVED");
     if (!text && !buttonId && !fileId) {
       if (state.stage === "MULTI_APPLICANT_INCLUDED" || state.stage === "MULTI_SAVED_DOCUMENTS_DECISION") {
         await repeatCurrentPrompt(from, state);
