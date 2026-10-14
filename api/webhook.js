@@ -214,6 +214,19 @@ async function showConfirmation(from, state) {
   await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
 }
 
+async function sendConfirmationRetryMenu(from) {
+  return sendYesNoMenu(from, "Спробувати підтвердити заявку ще раз?", "confirm_request", "edit_request");
+}
+
+function confirmationLog(event, request, details = {}) {
+  console.info(JSON.stringify({
+    event,
+    applicationId: request?.applicationId || null,
+    requestType: request?.type === "individual" && request?.multiPackage ? "individual_multi" : request?.type || "unknown",
+    ...details,
+  }));
+}
+
 function isMenuCommand(text) {
   return MENU_COMMANDS.has(String(text || "").trim().toLowerCase());
 }
@@ -310,6 +323,7 @@ async function recipientChoice(from, state, another) {
 export async function repeatCurrentPrompt(from, state, services = {}) {
   const repeatMultiApplicantIncluded = services.sendMultiApplicantIncludedMenu || sendMultiApplicantIncludedMenu;
   const repeatMultiSavedDocuments = services.sendMultiSavedDocumentsMenu || sendMultiSavedDocumentsMenu;
+  const repeatConfirmation = services.showConfirmation || showConfirmation;
   const prompts = {
     IDENTIFICATION: state.request?.type === "military_unit" ? "Для ідентифікації заявника вкажіть, будь ласка, ПІБ відповідальної особи." : "Для ідентифікації заявника вкажіть, будь ласка, ваше ПІБ.",
     MILITARY_UNIT_NUMBER: "Вкажіть, будь ласка, номер військової частини.",
@@ -344,7 +358,7 @@ export async function repeatCurrentPrompt(from, state, services = {}) {
   }
   if (state.stage === "DOCUMENT_UPDATE_DECISION") return sendYesNoMenu(from, "Ваші документи були оновлені понад рік тому. Бажаєте завантажити актуальні документи?", "update_documents_yes", "update_documents_no");
   if (state.stage === "RECIPIENT_CHOICE") return sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "recipient_other_yes", "recipient_other_no");
-  if (state.stage === "CONFIRMATION") return showConfirmation(from, state);
+  if (state.stage === "CONFIRMATION") return repeatConfirmation(from, state);
   if (state.stage === "EDIT_MENU") return sendEditMenu(from, state.request?.type, state.request?.multiPackage);
   if (state.stage === "EDIT_BENEFICIARY_FIELD") return sendBeneficiaryEditFieldMenu(from, (state.editBeneficiaryIndex || 0) + 1);
   if (state.stage === "EDIT_RECIPIENT_CHOICE") return sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "edit_recipient_other_yes", "edit_recipient_other_no");
@@ -421,8 +435,10 @@ export async function confirmRequest(from, state, assertClaimOwnership, services
     await assertClaimOwnership();
 
     if (!request.sheetsRecorded) {
+      confirmationLog("confirmation_sheets_started", request, { step: "multi_write" });
       await operations.appendMultiRequest(request, request.applicationId, request.confirmedAt);
       await assertClaimOwnership();
+      confirmationLog("confirmation_sheets_completed", request, { step: "multi_write" });
       request.sheetsRecorded = true;
       await operations.persistState(from, state);
       await assertClaimOwnership();
@@ -460,8 +476,10 @@ export async function confirmRequest(from, state, assertClaimOwnership, services
 
   if (!request.sheetsRecorded) {
     await assertClaimOwnership();
+    confirmationLog("confirmation_sheets_started", request, { step: "single_write" });
     await operations.appendRequest(request, request.applicationId, request.confirmedAt);
     await assertClaimOwnership();
+    confirmationLog("confirmation_sheets_completed", request, { step: "single_write" });
     request.sheetsRecorded = true;
     await operations.persistState(from, state);
     await assertClaimOwnership();
@@ -494,9 +512,10 @@ export async function confirmRequest(from, state, assertClaimOwnership, services
   await operations.clearState(from);
 }
 
-async function sendConfirmationFailure(from, state, assertClaimOwnership, error, services = {}) {
+export async function sendConfirmationFailure(from, state, assertClaimOwnership, error, services = {}) {
   const lookupRequest = services.lookupRequest || findRequestByApplicationId;
   const sendFailureText = services.sendFailureText || sendText;
+  const sendRetryMenu = services.sendRetryMenu || sendConfirmationRetryMenu;
   const applicationId = state.request?.applicationId;
   let sheetsRecorded = false;
 
@@ -525,8 +544,27 @@ async function sendConfirmationFailure(from, state, assertClaimOwnership, error,
   await assertClaimOwnership();
   await sendFailureText(from, message);
   await assertClaimOwnership();
-  console.error("Request confirmation error:", error);
+  await sendRetryMenu(from);
+  await assertClaimOwnership();
+  confirmationLog("confirmation_recoverable_failure", state.request, {
+    sheetsRecorded,
+    errorCode: error?.code || "UNKNOWN",
+  });
   return { failed: true, sheetsRecorded };
+}
+
+export async function handleConfirmationResult(from, state, result, services = {}) {
+  const sendMessage = services.sendText || sendText;
+  const sendRetryMenu = services.sendRetryMenu || sendConfirmationRetryMenu;
+  if (result?.busy) {
+    confirmationLog("confirmation_claim_busy", state.request);
+    await sendMessage(from, "Заявка вже підтверджується. Зачекайте завершення поточної обробки. Якщо результат не надійде, повторіть підтвердження трохи пізніше.");
+    await sendRetryMenu(from);
+  } else if (result?.claimLost) {
+    await sendMessage(from, "Поточна спроба підтвердження була перервана. Дані заявки збережено — спробуйте підтвердити її ще раз.");
+    await sendRetryMenu(from);
+  }
+  return result;
 }
 
 export async function runClaimedConfirmation(from, dependencies = {}) {
@@ -575,12 +613,20 @@ export async function runClaimedConfirmation(from, dependencies = {}) {
       await performConfirmation(from, latestState, assertClaimOwnership, dependencies.confirmationServices);
       return { completed: true };
     } catch (error) {
-      if (error?.code === "CONFIRMATION_CLAIM_LOST" || claimLost) return { claimLost: true };
+      if (error?.code === "CONFIRMATION_CLAIM_LOST" || claimLost) {
+        confirmationLog("confirmation_claim_lost", latestState.request);
+        return { claimLost: true };
+      }
       try {
         return await handleFailure(from, latestState, assertClaimOwnership, error, dependencies.failureServices);
       } catch (failureError) {
-        if (failureError?.code === "CONFIRMATION_CLAIM_LOST" || claimLost) return { claimLost: true };
-        console.error("Confirmation failure notification failed:", failureError);
+        if (failureError?.code === "CONFIRMATION_CLAIM_LOST" || claimLost) {
+          confirmationLog("confirmation_claim_lost", latestState.request);
+          return { claimLost: true };
+        }
+        confirmationLog("confirmation_failure_notification_failed", latestState.request, {
+          errorCode: failureError?.code || "UNKNOWN",
+        });
         return { failed: true, notificationFailed: true };
       }
     }
@@ -757,7 +803,29 @@ export default async function handler(req, res) {
     if (state.stage === "EDIT_RECIPIENT_CHOICE") { if (buttonId === "edit_recipient_other_yes") { state.request.data.recipientAnotherPerson = true; state.stage = "EDIT_RECIPIENT_NAME"; await saveUserState(from, state); await sendText(from, "Введіть нове ПІБ іншого отримувача."); } else if (buttonId === "edit_recipient_other_no") { state.request.data.recipientAnotherPerson = false; delete state.request.data.recipientName; delete state.request.data.recipientPhone; await showConfirmation(from, state); } else await sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "edit_recipient_other_yes", "edit_recipient_other_no"); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_RECIPIENT_NAME" && text) { state.request.data.recipientName = text; state.stage = "EDIT_RECIPIENT_PHONE"; await saveUserState(from, state); await sendText(from, "Введіть новий номер телефону іншого отримувача."); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_RECIPIENT_PHONE" && text) { state.request.data.recipientPhone = text; await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); }
-    if (state.stage === "CONFIRMATION") { if (buttonId === "confirm_request") { try { const result = await runClaimedConfirmation(from); if (result.busy) await sendText(from, "Заявка вже підтверджується. Будь ласка, зачекайте завершення обробки."); } catch (error) { console.error("Request confirmation error:", error); try { await sendText(from, "Не вдалося зареєструвати заявку через тимчасову технічну помилку. Будь ласка, натисніть «Підтвердити заявку» ще раз."); } catch (messageError) { console.error("Confirmation error message failed:", messageError); } } } else if (buttonId === "edit_request") { state.stage = "EDIT_MENU"; await saveUserState(from, state); await sendEditMenu(from, state.request.type, state.request.multiPackage); } return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "CONFIRMATION") {
+      if (buttonId === "confirm_request") {
+        try {
+          const result = await runClaimedConfirmation(from);
+          await handleConfirmationResult(from, state, result);
+        } catch (error) {
+          confirmationLog("confirmation_handler_failed", state.request, { errorCode: error?.code || "UNKNOWN" });
+          try {
+            await sendText(from, "Не вдалося завершити підтвердження через тимчасову технічну помилку. Дані заявки збережено.");
+            await sendConfirmationRetryMenu(from);
+          } catch (messageError) {
+            confirmationLog("confirmation_recovery_message_failed", state.request, { errorCode: messageError?.code || "UNKNOWN" });
+          }
+        }
+      } else if (buttonId === "edit_request") {
+        state.stage = "EDIT_MENU";
+        await saveUserState(from, state);
+        await sendEditMenu(from, state.request.type, state.request.multiPackage);
+      } else {
+        await repeatCurrentPrompt(from, state);
+      }
+      return res.status(200).send("EVENT_RECEIVED");
+    }
     if (state.stage === "OPERATOR") return res.status(200).send("EVENT_RECEIVED");
     if (state.stage === "CONFIRMED") { await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
     await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");

@@ -70,6 +70,8 @@ Military та individual profiles мають окремі Redis keys і не п�
 
 `applicationId` має формат `YYYY-MM-NNNN`, де `YYYY-MM` фіксується один раз за `Europe/Kyiv` перед первинною генерацією, а `NNNN` — місячна послідовність `0001`–`9999`. Redis key: `requests:counter:YYYY-MM`. Перед атомарним виділенням номера враховується максимальний уже записаний sequence у всіх однойменних місячних spreadsheets; retry завжди використовує стабільний ID зі state. Sheets lookup перевіряє лише місяць, закодований в ID, обидві request-вкладки та всі однойменні spreadsheet-файли.
 
+Запис нових заявок у Sheets серіалізується Redis lease за `spreadsheetId + sheetId`. Writer визначає explicit вільний range, використовує `values.update()` без фізичного insert рядків, перевіряє порожність target rows і після запису верифікує master/detail labels. Multi group охоплює лише detail rows; overlapping або неоднозначні groups/data завершуються safe error без автоматичного видалення чи перезапису. Retry може дописати лише перевірений порожній suffix detail block і не перезаписує сусідній master.
+
 `api/request-card-links-test.js` — temporary repair endpoint, currently retained для відновлення clickable request-card links у вже існуючих Sheets rows; не видаляти випадково. Поточну роботу над production WhatsApp Business App + Cloud API Coexistence не змінювати без окремого запиту: onboarding ще не завершений.
 
 `api/meta/oauth-callback.js` потрібен для Meta-hosted Embedded Signup. Не додавати до нього token exchange, збереження OAuth code або зміну WhatsApp/webhook flow без окремо погодженої задачі.

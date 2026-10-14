@@ -303,7 +303,9 @@ G passport | H rnokpp | I military_id | J ubd або blank | K:O blank
 
 Detail document cells показують filenames із окремими clickable Drive rich-text links для кожного файла. Тільки master B має real `applicationId` і request-card link. `Особа N` не є application ID, не підписується, не використовується для duplicate lookup і maintenance endpoint пропускає такі labels.
 
-Master + details первинно записуються одним matrix append. Retry шукає exact master `applicationId` у B, не створює duplicate master, може дозаповнити відсутній suffix detail block, повторно застосовує rich-text/master link і перевіряє grouping без збільшення depth. Неконсистентний detail block дає safe error без перезапису сусідньої заявки. `sheetsRecorded: true` встановлюється лише після rows, formatting, clickable master ID і grouping.
+Master + details первинно записуються одним explicit matrix write. Retry шукає exact master `applicationId` у B, не створює duplicate master, може дозаповнити відсутній suffix detail block, повторно застосовує rich-text/master link і перевіряє grouping без збільшення depth. Неконсистентний detail block дає safe error без перезапису сусідньої заявки. `sheetsRecorded: true` встановлюється лише після rows, formatting, clickable master ID і grouping.
+
+Актуальний Sheets writer не використовує `values.append(... INSERT_ROWS)`: single і multi writes серіалізуються Redis lease за `spreadsheetId + sheetId`, визначають наступний explicit вільний range і записують його через `values.update()`. Multi master + details записуються одним matrix write. Перед записом target rows мають бути порожні й поза існуючими groups; після запису master/detail labels верифікуються. Group створюється лише для exact detail range, а overlapping/nested або неоднозначна структура дає safe error без автоматичного виправлення даних. Retry дописує лише перевірений порожній suffix detail rows.
 
 ## IMPLEMENTED: Printable request card
 

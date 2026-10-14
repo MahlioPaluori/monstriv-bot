@@ -3,15 +3,19 @@ import test from "node:test";
 
 import {
   acquireConfirmationClaim,
+  acquireSheetWriteClaim,
   buildApplicantProfile,
   createApplicationNumber,
   getKyivApplicationPeriod,
   ownsConfirmationClaim,
+  ownsSheetWriteClaim,
   releaseConfirmationClaim,
+  releaseSheetWriteClaim,
   renewConfirmationClaim,
+  renewSheetWriteClaim,
 } from "../lib/state.js";
 import { createCanonicalApplicantDocumentCopies, materializeReusedApplicantDocument } from "../lib/google-drive.js";
-import { confirmRequest, repeatCurrentPrompt, runClaimedConfirmation } from "../api/webhook.js";
+import { confirmRequest, handleConfirmationResult, repeatCurrentPrompt, runClaimedConfirmation, sendConfirmationFailure } from "../api/webhook.js";
 import { buildRequestCardUrl } from "../api/request-card.js";
 
 class FakeRedis {
@@ -104,6 +108,17 @@ test("expired confirmation claim can be recovered by a new owner", async () => {
   assert.equal(await renewConfirmationClaim("380000000002", "owner-a", { redis, ttlSeconds: 1 }), false);
   assert.equal(await acquireConfirmationClaim("380000000002", "owner-b", { redis, ttlSeconds: 1 }), true);
   assert.equal(await releaseConfirmationClaim("380000000002", "owner-a", { redis }), false);
+});
+
+test("production sheet writer claim is scoped by spreadsheet and sheet and only its owner can release it", async () => {
+  const redis = new FakeRedis();
+  assert.equal(await acquireSheetWriteClaim("spreadsheet", 7, "writer-a", { redis, ttlSeconds: 2 }), true);
+  assert.equal(await acquireSheetWriteClaim("spreadsheet", 7, "writer-b", { redis, ttlSeconds: 2 }), false);
+  assert.equal(await acquireSheetWriteClaim("spreadsheet", 8, "writer-b", { redis, ttlSeconds: 2 }), true);
+  assert.equal(await ownsSheetWriteClaim("spreadsheet", 7, "writer-a", { redis }), true);
+  assert.equal(await renewSheetWriteClaim("spreadsheet", 7, "writer-a", { redis, ttlSeconds: 2 }), true);
+  assert.equal(await releaseSheetWriteClaim("spreadsheet", 7, "writer-b", { redis }), false);
+  assert.equal(await releaseSheetWriteClaim("spreadsheet", 7, "writer-a", { redis }), true);
 });
 
 function confirmationHarness(state) {
@@ -385,6 +400,7 @@ test("Sheets success followed by canonical failure reports partial success and r
   const failureServices = {
     lookupRequest: async () => ({ result: "found" }),
     sendFailureText: async (_phone, message) => { messages.push(message); },
+    sendRetryMenu: async () => {},
     persistState: async () => {},
   };
   const first = await runClaimedConfirmation("380000000008", {
@@ -427,6 +443,7 @@ test("Redis save failure immediately after Sheets append is reconciled from Shee
   const failureServices = {
     lookupRequest: async () => ({ result: "found" }),
     sendFailureText: async () => {},
+    sendRetryMenu: async () => {},
     persistState: async () => { reconciliations += 1; },
   };
   assert.deepEqual(await runClaimedConfirmation("380000000008", {
@@ -470,6 +487,45 @@ test("new multi decision stages repeat their production prompt for ordinary text
     sendMultiSavedDocumentsMenu: async () => { calls.push("saved-documents"); },
   });
   assert.deepEqual(calls, ["included", "saved-documents"]);
+});
+
+test("recoverable confirmation failure keeps CONFIRMATION and sends a fresh retry menu", async () => {
+  const state = { stage: "CONFIRMATION", request: { type: "individual", applicationId: "2026-10-0042" } };
+  const messages = [];
+  let menus = 0;
+  const result = await sendConfirmationFailure("phone", state, async () => {}, new Error("temporary"), {
+    lookupRequest: async () => ({ result: "found" }),
+    persistState: async () => {},
+    sendFailureText: async (_phone, message) => { messages.push(message); },
+    sendRetryMenu: async () => { menus += 1; },
+  });
+  assert.deepEqual(result, { failed: true, sheetsRecorded: true });
+  assert.equal(state.stage, "CONFIRMATION");
+  assert.match(messages[0], /вже зареєстровано/);
+  assert.equal(menus, 1);
+});
+
+test("busy and claimLost results provide a safe retry action", async () => {
+  const state = { stage: "CONFIRMATION", request: { type: "individual", applicationId: "2026-10-0043" } };
+  const messages = [];
+  let menus = 0;
+  const services = {
+    sendText: async (_phone, message) => { messages.push(message); },
+    sendRetryMenu: async () => { menus += 1; },
+  };
+  await handleConfirmationResult("phone", state, { busy: true }, services);
+  await handleConfirmationResult("phone", state, { claimLost: true }, services);
+  assert.equal(messages.length, 2);
+  assert.equal(menus, 2);
+  assert.equal(state.stage, "CONFIRMATION");
+});
+
+test("ordinary text recovery at CONFIRMATION repeats the production confirmation prompt", async () => {
+  let repeated = 0;
+  await repeatCurrentPrompt("phone", { stage: "CONFIRMATION", request: {} }, {
+    showConfirmation: async () => { repeated += 1; },
+  });
+  assert.equal(repeated, 1);
 });
 
 test("individual single confirmation keeps its Sheets-profile-success-reset order", async () => {
