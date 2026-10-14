@@ -324,6 +324,7 @@ export async function repeatCurrentPrompt(from, state, services = {}) {
   const repeatMultiApplicantIncluded = services.sendMultiApplicantIncludedMenu || sendMultiApplicantIncludedMenu;
   const repeatMultiSavedDocuments = services.sendMultiSavedDocumentsMenu || sendMultiSavedDocumentsMenu;
   const repeatConfirmation = services.showConfirmation || showConfirmation;
+  const repeatEditMenu = services.sendEditMenu || sendEditMenu;
   const prompts = {
     IDENTIFICATION: state.request?.type === "military_unit" ? "Для ідентифікації заявника вкажіть, будь ласка, ПІБ відповідальної особи." : "Для ідентифікації заявника вкажіть, будь ласка, ваше ПІБ.",
     MILITARY_UNIT_NUMBER: "Вкажіть, будь ласка, номер військової частини.",
@@ -359,7 +360,7 @@ export async function repeatCurrentPrompt(from, state, services = {}) {
   if (state.stage === "DOCUMENT_UPDATE_DECISION") return sendYesNoMenu(from, "Ваші документи були оновлені понад рік тому. Бажаєте завантажити актуальні документи?", "update_documents_yes", "update_documents_no");
   if (state.stage === "RECIPIENT_CHOICE") return sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "recipient_other_yes", "recipient_other_no");
   if (state.stage === "CONFIRMATION") return repeatConfirmation(from, state);
-  if (state.stage === "EDIT_MENU") return sendEditMenu(from, state.request?.type, state.request?.multiPackage);
+  if (state.stage === "EDIT_MENU") return repeatEditMenu(from, state.request?.type, state.request?.multiPackage);
   if (state.stage === "EDIT_BENEFICIARY_FIELD") return sendBeneficiaryEditFieldMenu(from, (state.editBeneficiaryIndex || 0) + 1);
   if (state.stage === "EDIT_RECIPIENT_CHOICE") return sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "edit_recipient_other_yes", "edit_recipient_other_no");
   if (state.stage === "EDIT_TEXT") {
@@ -372,6 +373,24 @@ export async function repeatCurrentPrompt(from, state, services = {}) {
     return sendEditMenu(from, state.request?.type, state.request?.multiPackage);
   }
   return sendText(from, "Продовжуйте заповнення заявки з поточного кроку.");
+}
+
+export function getInteractiveReplyId(message) {
+  return message?.interactive?.button_reply?.id
+    || message?.button?.payload
+    || message?.interactive?.list_reply?.id
+    || null;
+}
+
+export async function applyEditedField(from, state, text, services = {}) {
+  const editedField = state.editField;
+  state.request.data[editedField] = text;
+  if (editedField === "name" && state.request.multiPackage && state.request.beneficiaries?.[0]?.isApplicant) {
+    state.request.beneficiaries[0].name = text;
+  }
+  delete state.editField;
+  const returnToConfirmation = services.showConfirmation || showConfirmation;
+  return returnToConfirmation(from, state);
 }
 async function allocateNextApplicationId(assertClaimOwnership) {
   const period = getKyivApplicationPeriod();
@@ -691,7 +710,7 @@ export default async function handler(req, res) {
     const value = req.body?.entry?.[0]?.changes?.[0]?.value;
     const message = value?.messages?.[0];
     if (!message) return res.status(200).send("EVENT_RECEIVED");
-    const from = message.from, text = message.text?.body?.trim() || "", buttonId = message.interactive?.button_reply?.id || message.button?.payload || message.interactive?.list_reply?.id || null, fileId = mediaId(message);
+    const from = message.from, text = message.text?.body?.trim() || "", buttonId = getInteractiveReplyId(message), fileId = mediaId(message);
 
     if (["/reset", "reset"].includes(text.toLowerCase())) {
       await resetUserState(from); await sendText(from, "Тестову сесію скинуто. Починаємо заново."); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
@@ -842,7 +861,7 @@ export default async function handler(req, res) {
     if (state.stage === "EDIT_BENEFICIARY_SELECT") { const selected = /^\d+$/.test(text) ? Number(text) - 1 : NaN; if (!Number.isInteger(selected) || selected < 0 || selected >= state.request.beneficiaryCount) { await sendText(from, `Введіть номер особи від 1 до ${state.request.beneficiaryCount}.`); return res.status(200).send("EVENT_RECEIVED"); } state.editBeneficiaryIndex = selected; state.stage = "EDIT_BENEFICIARY_FIELD"; await saveUserState(from, state); await sendBeneficiaryEditFieldMenu(from, selected + 1); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_BENEFICIARY_FIELD") { if (buttonId === "edit_beneficiary_name" || buttonId === "edit_beneficiary_phone") { state.editBeneficiaryField = buttonId === "edit_beneficiary_name" ? "name" : "phone"; state.stage = "EDIT_BENEFICIARY_TEXT"; await saveUserState(from, state); await sendText(from, state.editBeneficiaryField === "name" ? "Введіть нове ПІБ особи." : "Введіть новий контактний номер телефону особи."); } else await sendBeneficiaryEditFieldMenu(from, state.editBeneficiaryIndex + 1); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_BENEFICIARY_TEXT") { const beneficiary = state.request.beneficiaries?.[state.editBeneficiaryIndex]; if (!beneficiary) { await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); } if (state.editBeneficiaryField === "phone") { const phone = normalizePhone(text); if (!phone) { await sendText(from, "Вкажіть коректний номер телефону: 7–15 цифр, за потреби з початковим +."); return res.status(200).send("EVENT_RECEIVED"); } beneficiary.phone = phone; } else if (state.editBeneficiaryField === "name" && text) beneficiary.name = text; else { await sendText(from, "Введіть непорожнє ПІБ."); return res.status(200).send("EVENT_RECEIVED"); } delete state.editBeneficiaryIndex; delete state.editBeneficiaryField; await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); }
-    if (state.stage === "EDIT_TEXT" && text) { const editedField = state.editField; state.request.data[editedField] = text; if (editedField === "name" && state.request.multiPackage && state.request.beneficiaries?.[0]?.isApplicant) state.request.beneficiaries[0].name = text; delete state.editField; await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "EDIT_TEXT" && text) { await applyEditedField(from, state, text); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_RECIPIENT_CHOICE") { if (buttonId === "edit_recipient_other_yes") { state.request.data.recipientAnotherPerson = true; state.stage = "EDIT_RECIPIENT_NAME"; await saveUserState(from, state); await sendText(from, "Введіть нове ПІБ іншого отримувача."); } else if (buttonId === "edit_recipient_other_no") { state.request.data.recipientAnotherPerson = false; delete state.request.data.recipientName; delete state.request.data.recipientPhone; await showConfirmation(from, state); } else await sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "edit_recipient_other_yes", "edit_recipient_other_no"); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_RECIPIENT_NAME" && text) { state.request.data.recipientName = text; state.stage = "EDIT_RECIPIENT_PHONE"; await saveUserState(from, state); await sendText(from, "Введіть новий номер телефону іншого отримувача."); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_RECIPIENT_PHONE" && text) { state.request.data.recipientPhone = text; await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); }
