@@ -1,447 +1,238 @@
 # Meta WhatsApp Tech Provider Setup
 
-> Актуально для проєкту WhatsApp-бота БФ «Корпорація Монстрів».
+> Технічна історія й поточний статус Meta-інтеграції WhatsApp-бота БФ «Корпорація Монстрів».
 >
-> Останнє оновлення: 20.08.2026
+> Останнє оновлення: 14.10.2026
 >
-> Мета документа — зафіксувати робочу схему підключення WhatsApp Business до нашого застосунку та не повторювати весь процес дослідження у випадку повторного налаштування або міграції.
+> Детальна архітектура, бізнес-сценарії та стан тестування бота описані в [PROJECT_CONTEXT.md](./PROJECT_CONTEXT.md).
 
-## 1. Архітектура
+## 1. Статуси, які не можна змішувати
 
-Використовуються два окремі Meta Business Portfolio.
+1. **Працює зараз:** production-бот приймає webhook-події та відповідає через WhatsApp Cloud API.
+2. **Підтверджено для Tech Provider:** Meta App `Monstriv Request` створений, Tech Provider path активований.
+3. **Не завершено або не перевірено:** Business Verification, Access Verification, App Review, остаточний доступ до WABA, Embedded Signup і Coexistence onboarding.
+4. **Призупинено:** запланована інтеграція Chatwoot не реалізована.
 
-### Business Portfolio 1 — власник WhatsApp
+Наявність сторінки Meta, кнопки або callback endpoint не доводить завершення всього onboarding.
 
-Організація: **Благодійний Фонд "Корпорація Монстрів"**.
+## 2. Поточна робоча інтеграція Cloud API
 
-Цей Business Portfolio повинен володіти:
-
-- WhatsApp Business Account (WABA);
-- робочим номером WhatsApp;
-- бізнес-активами самого фонду.
-
-Робочий номер: `+380 93 723 1211`
-
-Phone Number ID, отриманий під час діагностики: `1244260758772775`
-
-WABA ID, який використовувався під час перевірки: `3327165554110686`
-
-### Business Portfolio 2 — технічний провайдер
-
-Назва: **Monstriv Tech Dept**.
-
-Призначення:
-
-- володіє Meta App;
-- використовується як Tech Provider;
-- надає технічний сервіс для Business Portfolio фонду;
-- після необхідних перевірок має отримати доступ до WhatsApp-активів фонду.
-
-**Не потрібно переносити робочий номер WhatsApp у Monstriv Tech Dept.** Власником номера та WABA залишається Business Portfolio фонду.
-
-Схема:
+Production-бот працює як Node.js ESM застосунок у Vercel:
 
 ```text
-Business Portfolio фонду
-        |
-        | owns
-        v
- WABA + phone number
-        |
-        | access granted to
-        v
- Monstriv Tech Dept
-        |
-        | owns
-        v
-     Meta App
-        |
-        v
-  WhatsApp Bot
+WhatsApp user
+    ↓
+Meta WhatsApp Cloud API
+    ↓ webhook
+GET/POST /api/webhook
+    ↓
+Redis + Google Drive + Google Sheets
+    ↓
+WhatsApp Cloud API v26.0
 ```
 
-> Конкретний фінальний механізм надання Tech Provider доступу до WABA буде дописаний після проходження Business Verification / Access Verification. Не вважати цей крок уже завершеним.
-
-## 2. Чому пішли шляхом Tech Provider
-
-Попередня конфігурація мала ситуацію, коли номер існував у WhatsApp Manager, webhook отримував події, але API не міг нормально відправляти відповіді.
-
-Помилка:
-
-```text
-(#133010) Account not registered
-```
-
-Спроба ручної реєстрації через:
-
-```text
-POST /PHONE_NUMBER_ID/register
-```
-
-дала:
-
-```text
-Register endpoint is not available for SMB businesses.
-```
-
-При перевірці номера через Graph API було отримано:
-
-```json
-{
-  "id": "1244260758772775",
-  "display_phone_number": "+380 93 723 1211",
-  "verified_name": "Запити Монстрів",
-  "code_verification_status": "NOT_VERIFIED",
-  "platform_type": "ON_PREMISE"
-}
-```
-
-Висновок: простий виклик `/register` не є способом виправлення цієї конфігурації. Було вирішено створити окремий технічний Business Portfolio та пройти офіційний Tech Provider flow.
-
-## 3. Створення Meta App
-
-Meta App створюється під **Monstriv Tech Dept**.
-
-Use case:
-
-```text
-Connect with customers through WhatsApp
-```
-
-Після створення застосунку не потрібно одразу переносити або додавати номер фонду в технічний Business Portfolio.
-
-## 4. Перетворення застосунку на Tech Provider
-
-У Developer Dashboard:
-
-```text
-App Dashboard
-  → Become a Tech Provider
-```
-
-Meta показує запитання:
-
-```text
-Are you building this app to provide services for a client or another business?
-```
-
-Обрати:
-
-```text
-Yes, I'm a Tech Provider
-```
-
-Meta попереджає, що визначення App як Tech Provider незворотне для цього застосунку. Якщо режим вибрано помилково, простіше створити новий App.
-
-## 5. Що з'являється після ввімкнення Tech Provider
-
-У Dashboard додаються етапи:
-
-1. Customize the Connect with customers through WhatsApp use case
-2. Facebook Login for Business
-3. Review and complete testing requirements
-4. Business and access verification
-5. App Review
-6. Check that all requirements are met, then publish your app
-
-Це очікувана поведінка.
-
-## 6. Facebook Login for Business
-
-Після ввімкнення Tech Provider Meta додає Facebook Login for Business.
-
-У Settings доступні, зокрема:
-
-- Client OAuth Login;
-- Web OAuth Login;
-- Valid OAuth Redirect URIs;
-- Deauthorize callback URL;
-- Data Deletion Request URL.
-
-**Не заповнювати ці поля навмання.** Redirect URI повинен відповідати реальному onboarding/login flow. Спочатку завершуємо необхідні verification steps.
-
-## 7. Business Verification
-
-Developer Dashboard:
-
-```text
-Business and access verification
-  → Business verification
-  → Start verification
-```
-
-Для Monstriv Tech Dept було вибрано сценарій:
-
-```text
-Додатку потрібен доступ до дозволів у Meta for Developers
-```
-
-Тип організації:
-
-```text
-Установа
-```
-
-Meta прямо відносить до цього типу, зокрема, неприбуткові організації.
-
-Юридична назва, подана на перевірку:
-
-```text
-Благодійний Фонд "Корпорація Монстрів"
-```
-
-Вводити юридичну назву точно так, як вона зазначена в офіційних документах. Не використовувати `Monstriv Tech Dept` як юридичну назву БФ.
-
-Meta може запросити юридичну назву, адресу, телефон, email, сайт, підтвердження зв'язку з організацією та/або офіційні документи.
-
-### Поточний статус — 20.08.2026
-
-```text
-Триває перевірка
-```
-
-Meta показала орієнтовний строк — приблизно **2 робочі дні**.
-
-## 8. Access Verification
-
-Це окремий етап від Business Verification.
-
-Meta описує його як перевірку того, що бізнес є Tech Provider. Він потрібен для доступу до Meta business assets та інформації інших businesses.
-
-Перед запуском Access Verification інтерфейс вимагав:
-
-1. Remove the restrictions on your Business Account.
-2. Complete business verification.
-
-Очікуваний порядок:
-
-```text
-Business Verification
-        ↓
-Access Verification
-        ↓
-App Review / інші вимоги Meta
-        ↓
-Production setup
-```
-
-Не плутати Business Verification та Access Verification.
-
-## 9. Тимчасові обмеження нового Business Portfolio
-
-Під час створення Monstriv Tech Dept Meta тимчасово обмежила Business Account після швидкого створення нового профілю/активів.
-
-Симптом при спробі створити App:
-
-```text
-Business is not allowed to claim App
-Your business is prohibited from advertising, including claiming apps.
-```
-
-Це не означає автоматично, що архітектура Tech Provider неправильна.
-
-Якщо виникає таке обмеження:
-
-- не створювати багато нових Business Portfolio;
-- не переносити номер навмання;
-- перевірити Business Support Home;
-- дочекатися завершення перевірки Meta.
-
-## 10. Webhook
-
-Production webhook бота:
+- `api/webhook.js` — Meta verification і POST webhook/state machine;
+- `lib/whatsapp.js` — вихідні виклики Cloud API `v26.0`;
+- `api/meta/oauth-callback.js` — обмежений callback майбутнього Embedded Signup;
+- Redis — state, leases та idempotency;
+- Google Drive і Google Sheets — документи та заявки.
+
+Основний flow підтверджений ручними production-тестами заявок. Це **не є доказом завершення Tech Provider, Embedded Signup або Coexistence**.
+
+Production webhook:
 
 ```text
 https://monstriv-bot.vercel.app/api/webhook
 ```
 
-Webhook verification використовує Callback URL та Verify Token.
+Критична webhook-підписка — `messages`. HTTP `200` від endpoint підтверджує лише приймання webhook; успішність вихідного повідомлення перевіряється окремо за відповіддю Cloud API та безпечними логами.
 
-Verify Token — це **наш секретний рядок**, а не токен, який видає Meta. Він повинен збігатися між Vercel Environment Variables та значенням, введеним у Meta Developer Dashboard.
-
-Приклад:
+## 3. Цільова модель Meta assets
 
 ```text
-WHATSAPP_VERIFY_TOKEN=<secret>
+Business Portfolio БФ «Корпорація Монстрів»
+        | owns
+        v
+ WABA + production phone number
+        | grants approved access
+        v
+ Technical Business Portfolio / Tech Provider
+        | operates
+        v
+ Meta App «Monstriv Request» → WhatsApp Bot
 ```
 
-Не зберігати реальний Verify Token у Git.
+WABA і номер мають залишатися активами фонду. Доступ Tech Provider повинен надаватися через підтримуваний Meta flow, а не через необґрунтоване перенесення ownership.
 
-## 11. Webhook subscriptions
+Історичні нотатки називали цільовий технічний portfolio `Monstriv Tech Dept`. Старий portfolio `BikePride Extreme` не має підтверджених Business Verification та App Review і не планується як production owner. Правильна юридична сутність — БФ «Корпорація Монстрів»; admin/business access до її Meta/Facebook assets залишається передумовою подальшого onboarding.
 
-Для роботи чат-бота критична підписка:
+Перед міграцією потрібно повторно перевірити фактичний ownership App, WABA, номера та portfolios у Meta Business Manager.
+
+## 4. Підтверджені кроки Tech Provider
+
+Підтверджено:
+
+- створено Meta App `Monstriv Request` із WhatsApp use case;
+- активовано **Become a Tech Provider**;
+- у Dashboard з'явилися етапи Facebook Login for Business, verification, testing, App Review і publication;
+- у репозиторії є `api/meta/oauth-callback.js`.
+
+Tech Provider mode не надає автоматично доступ до WABA фонду й не означає проходження перевірок. Назви та порядок екранів Meta можуть змінюватися; орієнтиром є актуальний Dashboard.
+
+## 5. Незавершені або неперевірені етапи
+
+Станом на 14.10.2026 немає задокументованого підтвердження завершення:
+
+- Business Verification правильної юридичної сутності та portfolio;
+- Access Verification як Tech Provider;
+- потрібних permissions і App Review;
+- publication App для запланованого onboarding;
+- надання App/Tech Provider доступу до production WABA;
+- аудиту актуального `/{WABA_ID}/subscribed_apps`;
+- Embedded Signup end-to-end;
+- WhatsApp Business App + Cloud API Coexistence onboarding.
+
+Історичний статус від 20.08.2026 «триває перевірка» відображав лише UI на ту дату і не підтверджує успішну verification зараз. Business Verification та Access Verification — різні етапи; жоден не позначається завершеним без актуального доказу.
+
+## 6. Embedded Signup callback
+
+Endpoint:
 
 ```text
-messages
+GET /api/meta/oauth-callback
 ```
 
-У попередній конфігурації також були активні, зокрема:
+Він приймає `code` або OAuth error, повертає HTML-результат і може зафіксувати лише факт наявності code. Endpoint:
 
-```text
-message_template_quality_update
-message_template_status_update
-```
+- не обмінює authorization code на access token;
+- не зберігає code або token;
+- не змінює WhatsApp, Redis чи bot state;
+- не завершує WABA/phone onboarding.
 
-Для приймання звичайних вхідних повідомлень головною є `messages`.
+Тому успішний callback не означає завершення Embedded Signup. Redirect URI має відповідати реальному flow; не використовувати випадкові URL.
 
-## 12. Перевірка subscribed_apps
+## 7. Coexistence і production-номер
 
-Прив'язані до WABA застосунки можна перевірити Graph API запитом:
+Ціль — офіційний WhatsApp Business App + Cloud API Coexistence: бот працює через Cloud API, оператор — через підтримуваний Meta client або inbox.
 
-```text
-GET /{WABA_ID}/subscribed_apps
-```
+Поточний стан:
 
-Під час діагностики старої конфігурації відповідь показувала два застосунки:
+- production Cloud API bot працює;
+- Coexistence onboarding **не завершено**;
+- production-номер не можна deregister, видаляти або переносити навмання;
+- зміна ownership, WABA, Phone Number ID або credentials потребує окремого плану та end-to-end перевірки.
 
-```text
-ZapytMonstriv
-Monstriv Request
-```
+Не використовувати ручний `POST /PHONE_NUMBER_ID/register` як універсальне виправлення ownership/onboarding проблем.
 
-Після остаточної міграції потрібно перевірити, що WABA підписаний на актуальний production App, і не залишати старі subscriptions без потреби.
+## 8. Chatwoot — заплановано, але призупинено
 
-## 13. Vercel
+Chatwoot не інтегровано:
 
-Production endpoint:
+- немає Chatwoot API client або webhook endpoint;
+- немає підтверджених Chatwoot environment variables;
+- немає синхронізації діалогів, контактів чи статусів;
+- немає production operator queue/inbox через Chatwoot.
 
-```text
-/api/webhook
-```
+Поточний `OPERATOR` stage лише фіксує стан і показує повідомлення; він не передає діалог оператору чи в Chatwoot. Подальша робота призупинена до окремого рішення і потребуватиме дизайну, перевірки privacy/data retention та явного погодження.
 
-У Vercel Logs нормальне отримання webhook виглядало як:
+## 9. Історія діагностики
 
-```text
-POST 200 /api/webhook
-```
-
-**HTTP 200 означає лише те, що endpoint прийняв webhook.** Це не гарантує, що бот зміг відправити відповідь через WhatsApp API.
-
-У нашому випадку webhook отримувався успішно, але відправлення відповіді падало з:
+У попередній конфігурації webhook отримував події, але вихідні API-виклики повертали:
 
 ```text
 (#133010) Account not registered
 ```
 
-Тому завжди перевіряти обидва напрямки:
+Ручний виклик `POST /PHONE_NUMBER_ID/register` повідомляв, що endpoint недоступний для SMB. Історичний Graph metadata також показував непідтверджений номер і `platform_type: ON_PREMISE`. Це стало причиною початку Tech Provider flow, але не описує автоматично актуальний production стан.
+
+Історично `/{WABA_ID}/subscribed_apps` показував старий і новий App. Перед завершенням міграції аудит потрібно повторити; старі subscriptions/App не видаляти до повного тесту нового setup.
+
+Конкретні phone, WABA та app identifiers тут навмисно не зберігаються. Їх звіряють у Meta Dashboard або контрольованому config/secret storage.
+
+## 10. Webhook verification та environment variables
+
+GET verification у коді використовує:
 
 ```text
-WhatsApp → webhook
-bot → WhatsApp Graph API
+WEBHOOK_VERIFY_TOKEN=<secret>
 ```
 
-## 14. Environment Variables
+Verify Token — створений нами секретний рядок, однаковий у Vercel і Meta Dashboard. Це не Access Token.
 
-Production deployment повинен мати актуальні:
+Cloud API flow очікує:
 
 ```text
 WHATSAPP_PHONE_NUMBER_ID
 WHATSAPP_ACCESS_TOKEN
-WHATSAPP_VERIFY_TOKEN
+WEBHOOK_VERIFY_TOKEN
 ```
 
-У коді на момент написання використовується Graph API `v26.0`.
+Значення не зберігаються в Git чи документації. Після зміни App, WABA або номера не можна припускати валідність старих credentials; відповідність assets перевіряється без виведення значень у логи.
 
-Після створення нового App потрібно замінити credentials у Vercel. Старий Access Token від старого Meta App не слід автоматично вважати придатним для нового App.
+## 11. Безпечний порядок продовження onboarding
 
-Також перевірити, що `WHATSAPP_PHONE_NUMBER_ID` належить потрібному production номеру/WABA.
+1. Отримати підтверджений admin/business access до assets фонду.
+2. Уточнити ownership App, WABA і production-номера.
+3. Перевірити Business Verification правильної юридичної сутності.
+4. Завершити потрібні Business/Access Verification та App Review.
+5. Налаштувати Facebook Login for Business і Embedded Signup за актуальними вимогами Meta.
+6. Реалізувати server-side token exchange лише окремим погодженим завданням.
+7. Пройти official Coexistence onboarding без ручного перенесення номера.
+8. Перевірити `messages` і `/{WABA_ID}/subscribed_apps`.
+9. Провести двосторонній end-to-end тест: inbound webhook і outbound message.
+10. Лише після цього планувати очищення старих subscriptions/App.
 
-## 15. Що НЕ робити
+Під час цих робіт не змінювати business flow бота; його описано в [PROJECT_CONTEXT.md](./PROJECT_CONTEXT.md).
 
-- не викликати `/register` для SMB навмання;
-- не переносити номер між Business Portfolio лише через статус Offline;
-- не створювати новий WABA, поки не зрозуміло, навіщо він потрібен;
-- не видаляти старий WABA до завершення міграції;
-- не видаляти старий App до повної перевірки нового;
-- не міняти Phone Number ID навмання;
-- не використовувати старий Access Token із новим App без перевірки;
-- не плутати Verify Token з Access Token;
-- не робити App Tech Provider, якщо він має працювати лише з власними активами того самого Business Portfolio;
-- не заповнювати OAuth Redirect URI випадковими URL;
-- не робити висновок про працездатність бота лише з `POST 200` webhook.
+## 12. Checklists
 
-## 16. Майбутня процедура відновлення / міграції
+### Поточний production Cloud API bot
 
-1. Створити окремий технічний Business Portfolio.
-2. Створити Meta App у технічному Business Portfolio.
-3. Додати use case `Connect with customers through WhatsApp`.
-4. Перевести App у Tech Provider.
-5. Пройти Business Verification.
-6. Пройти Access Verification.
-7. Виконати необхідні вимоги App Review.
-8. Налаштувати Facebook Login for Business / onboarding flow згідно з актуальними вимогами Meta.
-9. Надати Tech Provider доступ до WABA фонду — точну процедуру дописати після фактичного проходження цього етапу.
-10. Перевірити `/{WABA_ID}/subscribed_apps`.
-11. Налаштувати webhook.
-12. Підписати webhook на `messages`.
-13. Отримати production credentials.
-14. Оновити Vercel Environment Variables.
-15. Redeploy production.
-16. Надіслати тестове повідомлення на номер бота.
-17. Перевірити в Vercel отримання POST webhook.
-18. Перевірити відправлення відповіді через Graph API.
-19. Лише після повного end-to-end тесту прибирати старий App/інтеграцію.
+- [x] Реалізований GET/POST `/api/webhook`.
+- [x] Вихідні повідомлення використовують Cloud API `v26.0`.
+- [x] Production flow заявок пройшов ручні end-to-end тести.
+- [x] Секрети надходять через environment variables, а не Git.
+- [ ] Актуальний зв'язок App/WABA/portfolio повторно задокументовано після Meta-аудиту.
 
-## 17. End-to-end checklist
+### Tech Provider / Embedded Signup / Coexistence
 
-Інтеграція вважається робочою лише якщо виконуються всі потрібні для поточної конфігурації пункти:
+- [x] Meta App `Monstriv Request` існує.
+- [x] Tech Provider path активований.
+- [x] OAuth callback endpoint існує.
+- [ ] Business Verification підтверджено для правильної сутності.
+- [ ] Access Verification підтверджено.
+- [ ] Необхідний App Review підтверджено.
+- [ ] Server-side code exchange і secure token handling реалізовано.
+- [ ] Потрібний доступ до WABA підтверджено.
+- [ ] `subscribed_apps` перевірено для актуального production setup.
+- [ ] Embedded Signup завершено end-to-end.
+- [ ] Coexistence завершено й перевірено.
 
-- [ ] Meta App належить Monstriv Tech Dept
-- [x] App позначений як Tech Provider
-- [ ] Business Verification completed
-- [ ] Access Verification completed
-- [ ] необхідні вимоги App Review completed
-- [ ] WABA фонду доступний Tech Provider
-- [ ] перевірений правильний Phone Number ID
-- [ ] перевірений правильний WABA ID
-- [ ] правильний production Access Token
-- [ ] webhook verification успішна
-- [ ] subscription `messages` активна
-- [ ] `/{WABA_ID}/subscribed_apps` показує актуальний App
-- [ ] Vercel отримує POST `/api/webhook`
-- [ ] Graph API дозволяє відправляти повідомлення
-- [ ] користувач пише боту і отримує відповідь
-- [ ] production bot більше не залежить від старого App
+### Chatwoot
 
-## 18. Security
+- [ ] Архітектуру та privacy boundaries погоджено.
+- [ ] Інтеграцію реалізовано.
+- [ ] Production operator handoff перевірено.
 
-Ніколи не комітити в Git:
+## 13. Що не робити
 
-- App Secret;
-- Access Token;
-- Verify Token;
-- System User Token;
-- OAuth credentials;
-- Google credentials;
-- Redis credentials.
+- не deregister і не переносити production-номер без погодженого плану;
+- не створювати WABA або portfolios як випадкову спробу виправлення;
+- не видаляти старий App/subscription до end-to-end тесту нового setup;
+- не змішувати Verify Token з Access Token;
+- не вважати `POST 200` доказом успішної відповіді користувачеві;
+- не позначати verification, App Review, Embedded Signup чи Coexistence завершеними через саму наявність UI або endpoint;
+- не підключати Chatwoot без окремого завдання;
+- не логувати webhook payload, tokens, OAuth codes, телефони чи персональні дані.
 
-У документації зберігати тільки placeholders на кшталт:
+## 14. Security
+
+Ніколи не комітити App Secret, Access/Verify/System User tokens, OAuth codes, Google/Redis credentials або повні production webhook payloads.
+
+У документації використовувати лише назви змінних і placeholders:
 
 ```text
 VARIABLE_NAME=<secret>
 ```
 
-Самі секрети повинні знаходитися у Vercel Environment Variables або іншому secret storage.
-
-## 19. Головний принцип
-
-Завжди розділяти три сутності:
-
-```text
-Благодійний Фонд "Корпорація Монстрів"
-    = юридична організація / власник WhatsApp assets
-
-Monstriv Tech Dept
-    = Tech Provider / технічний Business Portfolio
-
-Meta App
-    = програмний застосунок, через який працює бот
-```
-
-Якщо Meta запитує **«Чий це WhatsApp/WABA?»** — БФ «Корпорація Монстрів».
-
-Якщо Meta запитує **«Хто надає технічний сервіс?»** — Monstriv Tech Dept.
-
-Якщо йдеться про програмну інтеграцію — Meta App, створений у Monstriv Tech Dept.
-
-Не ламати це розділення спробами вручну переносити номер між Business Portfolio без чіткої причини.
+Phone Number ID, WABA ID та інші production identifiers не є токенами, але є чутливими інфраструктурними metadata. Їх не потрібно зберігати в публічній документації без операційної потреби.

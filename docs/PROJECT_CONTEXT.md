@@ -10,6 +10,23 @@ Monstriv Bot — WhatsApp-бот для структурованого збор�
 
 Код — authoritative source фактичної поведінки. Цей документ — business/project context. Production workflow: local VS Code → checks → commit → push `main` → Vercel deployment. GitHub `main` є source of truth для production deployment, але фактичний live deployment слід підтверджувати окремо.
 
+## Архітектура
+
+Проєкт — Node.js ESM (`"type": "module"`, Node.js `>=20`) для Vercel serverless. Процес не має надійної локальної пам'яті між invocations, тому conversation state, profiles, counters і distributed leases зберігаються в Redis.
+
+- `api/webhook.js` — GET verification і POST webhook Meta WhatsApp, state machine, navigation, document intake та confirmation lifecycle.
+- `lib/whatsapp.js` — WhatsApp Cloud API `v26.0`, text, reply-button і list messages.
+- `lib/state.js` — Redis state/profile helpers, monthly counters, media/document claims, confirmation та Sheets writer leases.
+- `lib/meta-media.js` — отримання WhatsApp media як `Buffer`.
+- `lib/google-drive.js` — OAuth2 Drive client, папки, uploads, move/rename та idempotent copies.
+- `lib/google-sheets.js` — monthly spreadsheets, single/multi writer, rich-text links, grouping і read-only request lookup.
+- `api/request-card.js` — HMAC-захищена printable HTML-картка, дані для якої читаються з Sheets.
+- `api/request-card-links-test.js` — тимчасовий захищений maintenance endpoint для відновлення clickable IDs у current monthly spreadsheet.
+- `api/meta/oauth-callback.js` — обмежений callback Embedded Signup без token exchange.
+- `test/*.test.js` — локальні production-function tests із mocks; реальні Google/Redis/WhatsApp ресурси не використовуються.
+
+Основні зовнішні системи: WhatsApp Cloud API, Redis, Google Drive API, Google Sheets API, Vercel і GitHub. `package.json` має runtime dependencies `googleapis` та `redis`; окремого test framework немає, використовується `node:test`.
+
 ## IMPLEMENTED: WhatsApp flows
 
 ### Перший контакт
@@ -89,7 +106,9 @@ Multi edit stages: `EDIT_BENEFICIARY_SELECT`, `EDIT_BENEFICIARY_FIELD`, `EDIT_BE
 
 Beneficiary phone required і validated, але не використовується для profile lookup/save та не створює beneficiary profile. Якщо колишній beneficiary пізніше звернеться зі свого WhatsApp `from` без existing applicant profile, він проходить new applicant flow і завантажує documents заново.
 
-Для returning applicant за WhatsApp phone існує Redis profile. Бот пропонує «Збережені дані» або «Ввести заново». При single використовується current saved-document/delivery behavior; якщо documents старші за 365 днів, доступне рішення оновити їх. При multi reuse-иться лише applicant identity: saved applicant documents, delivery, recipient fields і applicant documents як beneficiary #1 не використовуються. Multi uploads не стають applicant saved documents і не оновлюють applicant document timestamp. Existing applicant profile documents/timestamp зберігаються; якщо profile не існує, multi не створює misleading saved-document profile з beneficiary documents.
+Для returning applicant за WhatsApp phone існує persistent Redis profile. Бот пропонує «Збережені дані» або «Ввести заново». При single повторно використовуються profile data і documents; якщо documents старші за 365 днів, користувач може залишити їх або завантажити актуальні.
+
+У multi-flow після вибору «Збережені дані», кількості осіб і наявності повного saved package бот питає, чи входить applicant до числа beneficiaries. Якщо ні — всі packages збираються заново. Якщо так — applicant стає beneficiary №1 (`isApplicant: true`): актуальні saved documents копіюються після confirmation в application-specific files, а оригінальні canonical profile files не переміщуються й не перейменовуються. Для documents старших за 365 днів окремий multi-stage пропонує `multi_saved_use` або `multi_saved_replace`. У replace-path новий package applicant після успішного confirmation копіюється в стабільні canonical files і оновлює лише applicant profile; documents інших beneficiaries ніколи не стають profile documents. Якщо попереднього profile немає, звичайний multi не створює misleading saved-document profile з beneficiary documents.
 
 ### Військова частина
 
@@ -116,14 +135,24 @@ APPLICANT_TYPE
 
 Single/ВЧ summary показує тип, ПІБ, телефон, номер ВЧ (за потреби), delivery, кількість documents і need. Multi summary надсилається частинами: applicant/need, окремий блок кожного beneficiary зі статусом/кількістю documents, потім спільний delivery block; confirmation buttons з'являються після останньої частини. Користувач підтверджує або переходить до edit flow.
 
+Перед зовнішніми confirmation operations handler атомарно захоплює Redis claim `wa:confirmation:<phone>` з унікальним owner token. TTL поновлюється heartbeat; ownership перевіряється навколо зовнішніх side effects, а release виконується лише owner. Після першого успішного claim користувач один раз отримує «⏳ Реєструємо вашу заявку. Будь ласка, зачекайте на підтвердження.». Конкурентний/повторний callback із `busy` не запускає другу обробку й не надсилає retry або failure messages.
+
+При втраті claim старий handler не має права надсилати success/failure. Recovery prompt можливий лише якщо handler атомарно отримав новий claim, актуальний state усе ще `CONFIRMATION`, а exact application ID ще не знайдено у Sheets. При recoverable failure до запису в Sheets зберігаються stage, request data та стабільний application ID і повторно показуються `confirm_request`/`edit_request`. Якщо Sheets уже містить заявку, повторну реєстрацію не пропонують. Фінальна доставка WhatsApp не має exactly-once гарантії: Meta може прийняти повідомлення навіть при HTTP timeout, тому система уникає суперечливих success/failure/retry повідомлень, але не може довести фактичну доставку без окремого outbox/status reconciliation.
+
+### Редагування і навігація
+
+На confirmation «Ні» (`edit_request`) зберігає `stage = EDIT_MENU` і відкриває WhatsApp interactive list. List має один section і 5 полів для individual single, 6 для individual multi (`edit_beneficiary`) або military (`edit_unit_number`); row IDs не змінені. Webhook нормалізує `interactive.list_reply.id`, `interactive.button_reply.id` і legacy `button.payload`. Після зміни поля `showConfirmation()` знову зберігає `CONFIRMATION` і показує актуальне зведення; зміна applicant name синхронізує beneficiary №1, якщо `isApplicant === true`.
+
+Команди `/menu`, `start`/`/start` і `старт` не скидають активну заявку: користувач отримує navigation menu з `resume_request` і `cancel_request`. `resume_request` відновлює prompt поточного stage, включно з `EDIT_MENU`, документами, recipient choice та confirmation. Відмова від cancel повертає exact попередній stage; підтверджений cancel очищає request state і тимчасові document/media sequence keys, а persistent applicant і military-contact profiles залишаються.
+
 Успішний порядок для фізособи:
 
 1. Стабілізувати `applicationId`, `confirmedAt` і початковий `sheetsRecorded` у Redis state.
 2. Записати заявку в Google Sheets.
 3. Зберегти `sheetsRecorded: true`.
 4. Для фізособи зберегти Redis profile.
-5. Надіслати WhatsApp success із тим самим ID.
-6. Викликати `resetUserState()`.
+5. Зробити best-effort спробу надіслати WhatsApp success із тим самим ID.
+6. Після завершеної реєстрації викликати `resetUserState()`; помилка фінальної доставки логується і не запускає повторну реєстрацію.
 
 Для individual multi використовується окремий порядок:
 
@@ -134,22 +163,22 @@ Single/ВЧ summary показує тип, ПІБ, телефон, номер В
 5. Застосувати detail document rich-text links, clickable master ID і detail row grouping.
 6. Лише після повного multi persistence встановити `sheetsRecorded: true` і зберегти state.
 7. Безпечно обробити profile тільки actual applicant: existing documents/timestamp зберегти; beneficiary profiles не створювати.
-8. Надіслати WhatsApp success із тим самим ID.
-9. Викликати `resetUserState()`.
+8. Зробити best-effort спробу надіслати WhatsApp success із тим самим ID.
+9. Після завершеної реєстрації викликати `resetUserState()`.
 
 До повного Drive + Sheets success state не очищається і success не надсилається. Retry повторно перевіряє idempotent Drive/Sheets operations.
 
 Успішний порядок для ВЧ:
 
 1. Стабілізувати `applicationId`, `confirmedAt` і початковий `sheetsRecorded` у Redis state.
-2. Виконати Sheets append або existing-ID detection.
+2. Виконати explicit-range Sheets write або existing-ID detection усередині writer lease.
 3. Встановити `sheetsRecorded: true` і зберегти state.
 4. Перемістити/перейменувати official-request Drive files за фінальним `request.data.name`.
 5. Оновити `request.documents.official_request` і зберегти state.
 6. Оновити military document rich-text links у Sheets H.
 7. Зберегти military contact profile з фінальним ПІБ.
-8. Надіслати WhatsApp success із тим самим ID.
-9. Викликати `resetUserState()`.
+8. Зробити best-effort спробу надіслати WhatsApp success із тим самим ID.
+9. Після завершеної реєстрації викликати `resetUserState()`.
 
 При помилці Sheets, Drive finalize або military Sheets H update state не очищається і success не надсилається. `applicationId` не генерується в `sendText`/`sendMessage` і лишається стабільним між retry.
 
@@ -164,6 +193,8 @@ Redis (`REDIS_URL`) зберігає:
 - `wa:media:<phone>:<mediaId>` — media upload claim на 10 хвилин;
 - `wa:doc-ack:<phone>:<documentLabel>` — single claim кнопки «Готово»; multi semantic scope — `multi:<beneficiaryIndex>:<documentKey>` під тим самим reset-compatible prefix;
 - `wa:doc-seq:<phone>:<documentKey>` — single атомарна нумерація; multi scope — `multi:<beneficiaryIndex>:<documentKey>`.
+- `wa:confirmation:<phone>` — confirmation lease з owner token, TTL 2 хвилини та heartbeat;
+- `sheets:writer:<spreadsheetId>:<sheetId>` — міжпроцесний Sheets writer lease з owner token, TTL 2 хвилини та heartbeat.
 
 `applicationId` має формат `YYYY-MM-NNNN`, наприклад `2026-10-0001`. Період `YYYY-MM` фіксується один раз за часовим поясом `Europe/Kyiv` при первинній генерації, а послідовність `0001`–`9999` починається заново кожного місяця. Redis атомарно виділяє номер у `requests:counter:YYYY-MM`, враховуючи максимальний sequence, уже записаний у всіх однойменних місячних Google Sheets. Тому після втрати counter наступний номер продовжується після Sheets maximum; retry використовує стабільний `applicationId` зі state.
 
@@ -268,7 +299,7 @@ Default для нової заявки: `Нова`. Conditional formatting rules
 
 ### Запис заявок і документи
 
-При confirmation заявка записується у відповідний лист. Перед повторним append виконується lookup exact `applicationId` у `B2:B`; звичайний retry не має створювати другий рядок.
+При confirmation заявка записується у відповідний лист. Усередині writer lease повторно перевіряється exact `applicationId` у `B2:B`; retry не має створювати другий master row.
 
 У document cells raw Drive URLs не показуються. Показуються filenames в одній клітинці, наприклад:
 
@@ -326,9 +357,9 @@ Security:
 
 Signed URL є permanent bearer link: той, хто отримав URL, може відкрити картку.
 
-Lookup read-only, не викликає `getOrCreateCurrentMonthSpreadsheet()`, шукає ID у column B листів `Фізособи` та `Військові частини`, враховує UTC/Kyiv year boundary і не вибирає duplicate ID автоматично.
+Lookup read-only, не викликає `getOrCreateCurrentMonthSpreadsheet()`. Період береться безпосередньо з `YYYY-MM` у ID; пошук охоплює всі spreadsheets з відповідною місячною назвою, обидва листи та exact значення у column B. `not_found` дає HTTP 404, справжній duplicate — 409, invalid data — 422, інтеграційна помилка — 500.
 
-Картка містить exact application ID без префіксів, ПІБ, дату, номер ВЧ (лише для ВЧ), потребу, порожній блок «Комплектація / примітки», фактичного отримувача, телефон, місто та Нову пошту. Вона не містить статус, документи або Drive links.
+Картка містить exact application ID, ПІБ, дату, номер ВЧ (лише для ВЧ), потребу, порожній блок «Комплектація / примітки», фактичного отримувача, телефон, місто та Нову пошту. Вона не показує Sheets status або Drive URLs.
 
 Картка printable A4 portrait, має screen-only кнопку «Друкувати» та покращений office-friendly дизайн. Shipping block оптимізований для copy/paste:
 
@@ -341,9 +372,7 @@ Lookup read-only, не викликає `getOrCreateCurrentMonthSpreadsheet()`, 
 
 Поточний дизайн функціональний; подальше UI polishing можливе, але не є пріоритетом.
 
-Для multi request-card lookup знаходить exact master `applicationId`, ігнорує `Особа N` labels і читає applicant/need/delivery з master row, тому current HTML не падає та не показує detail beneficiary як applicant.
-
-**NEXT / PLANNED limitation:** beneficiaries multi-заявки поки не відображаються в HTML request card.
+Для multi request-card lookup знаходить exact master `applicationId`, читає безпосередньо наступні `Особа 1`, `Особа 2`, … detail rows і відображає кожного beneficiary: index, ПІБ, phone та позначки наявності `passport`, `rnokpp`, `military_id`, `ubd`. Картка не показує самі filenames або Drive links.
 
 ## TEMPORARY / CURRENTLY RETAINED FOR TESTING
 
@@ -392,12 +421,31 @@ Production number зараз залишається у WhatsApp Business App. Й
 
 Operator handoff залишається high priority, але залежить від завершення production WhatsApp/Coexistence onboarding. Current `OPERATOR` state лише фіксує стан і повідомляє користувача; реальної operator queue/inbox integration ще немає.
 
+## Стан перевірок на 14.10.2026
+
+### Підтверджено ручним тестуванням
+
+- мультиперсональна заявка успішно зареєстрована;
+- master/detail rows і group лише для detail rows перевірені в Google Sheets;
+- confirmation UX показує спочатку повідомлення про обробку, потім success, без суперечливих busy/retry messages;
+- спостережуваний час однієї реєстрації — приблизно 25–30 секунд; це не SLA, не timeout і не гарантія;
+- «Ні» на confirmation відкриває list menu редагування;
+- редагування полів і збереження змін перевірені;
+- ВЧ-заявка зі збереженим canonical contact name працює;
+- ВЧ-заявка зі збереженим отримувачем працює;
+- ВЧ-заявка з іншим отримувачем працює.
+
+### Автоматизовані локальні перевірки
+
+На актуальному HEAD перед цим documentation update `node --test` проходив 49/49 тестів. Suite включає confirmation claims/lifecycle, application ID allocation, Drive-copy idempotency mocks, Sheets writer/master-detail recovery, edit-menu list payload і navigation recovery. Це mock/local coverage, а не підтвердження доступності чи exactly-once поведінки зовнішніх сервісів.
+
+Інші сценарії не слід вважати ручно перевіреними лише на підставі коду або mock-тестів.
+
 ## PLANNED
 
 ### Інші майбутні задачі
 
 - inventory marker logic;
-- multi beneficiaries у request-card HTML;
 - production WhatsApp Coexistence onboarding від правильної business entity;
 - реальна operator message queue / handoff після onboarding;
 - cleanup temporary request-card test endpoints пізніше;
@@ -405,15 +453,14 @@ Operator handoff залишається high priority, але залежить �
 
 ## KNOWN RISKS
 
-1. Два паралельні confirms теоретично можуть обидва пройти lookup-before-append і створити duplicate row.
-2. Якщо базовий append фізособи успішний, а первинне rich-text document formatting впаде, retry знайде ID і може не повторити formatting; ВЧ document cell окремо оновлюється після Drive finalize.
-3. Permanent signed request-card URLs — bearer links.
-4. UTC-рік application ID і `Europe/Kyiv` month spreadsheet мають новорічну межу; request-card lookup шукає рік ID і наступний рік.
+1. Redis leases серіалізують confirmation і Sheets writer між Vercel invocations, але ownership check не може скасувати HTTP-запит, який уже виконується в момент втрати lease. Це не повна exactly-once семантика зовнішніх API.
+2. WhatsApp може прийняти повідомлення, навіть якщо HTTP-запит завершився timeout. Фінальна success-доставка не має transactional outbox/status reconciliation; код уникає суперечливого retry, але користувач у рідкісному випадку може не побачити success.
+3. Окремого загального deduplication key для кожного WhatsApp message ID немає. Confirmation claim серіалізує confirm callbacks; media upload і document acknowledgement мають власні claims. Глобальна дедуплікація без crash-recovery дизайну могла б заблокувати законний retry.
+4. Permanent signed request-card URLs — bearer links без expiry або revocation per link.
 5. ФІЗ Drive folders групуються за ПІБ: різні люди з однаковим ПІБ потенційно можуть потрапити в одну папку.
-6. Temporary testing endpoints є захищеними bearer-token routes і мають бути переглянуті окремо після завершення ширшого тестування.
-7. Окремого загального deduplication key для кожного WhatsApp message ID немає; є media upload і document acknowledgement claims.
-8. Legacy root-level `ФІЗ/<beneficiary> — Особа N/` folders, створені до `5434e56`, не мігруються глобально автоматично; нові uploads їх не створюють.
-9. Multi beneficiaries поки не відображаються у printable request-card HTML.
+6. Temporary `request-card-links-test` endpoint є bearer-token maintenance route і має бути видалений окремим рішенням після завершення тестування.
+7. Legacy root-level `ФІЗ/<beneficiary> — Особа N/` folders не мігруються автоматично; нові uploads їх не створюють.
+8. В `OPERATOR` немає реальної черги або inbox integration.
 
 ## Environment variables
 
@@ -427,10 +474,10 @@ Operator handoff залишається high priority, але залежить �
 
 ## Development history
 
-Актуальний HEAD на момент оновлення документації:
+Актуальний code HEAD перед локальним documentation update:
 
 ```text
-a52d18c Remove obsolete Vercel test endpoints
+d264820 fix: use WhatsApp list for request editing menu
 ```
 
-Ключові milestones після попереднього documentation sync `3ef4f46`: повний individual multi-package WhatsApp/state flow, Drive finalization і Sheets master/detail persistence (`8988c99`), nested multi collection routing із conservative empty-parent cleanup (`5434e56`), printable multi request card (`7618c88`), Meta Embedded Signup OAuth callback (`b2c7299`) та cleanup obsolete Drive test endpoints для Vercel Hobby function limit (`a52d18c`). Earlier milestones: military contact profile (`33d809e`), clickable request-card IDs (`4d0797d`), first-contact UX (`75ac3e9`) і military Drive/Sheets finalization (`a29690f`).
+Останні milestones: multi saved-applicant document reuse і safe confirmation (`c24a2e9`), Kyiv monthly application IDs (`a96ab97`), Redis-serialized explicit-range Sheets writer (`2f57721`), suppression conflicting confirmation messages (`ff0dffb`) та WhatsApp list edit menu (`d264820`). Раніше реалізовано military contact profile, clickable request-card IDs, first-contact UX, military Drive/Sheets finalization, individual multi flow, printable multi request card і Meta Embedded Signup callback.

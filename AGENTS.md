@@ -41,7 +41,17 @@ Vercel Hobby дозволяє не більше 12 Serverless Functions у deplo
 
 Не переписувати робочі частини лише заради стилю. Не ламати Meta verification/POST webhook, Redis claims, media upload, Google Drive, Google Sheets або request-card інтеграції. Не припускати, що кожен документ є зображенням; зберігати коректне розширення файлу.
 
+### Перевірки
+
+Для змінених JavaScript-файлів запускати `node --check`; для поведінкових змін — `node --test` або релевантний production-oriented test file; перед передачею роботи — `git diff --check` і перегляд фактичного diff. Тести мають викликати production functions через контрольовані mocks і не повинні звертатися до production Redis, Google Drive, Google Sheets або WhatsApp API. Не вважати mock-тест доказом реальної доставки зовнішнім API.
+
+WhatsApp interactive reply buttons мають містити 1–3 кнопки. Для більшої кількості варіантів використовувати list message: не більше 10 rows сумарно, короткі унікальні row IDs, button text до 20 символів і row/section titles до 24 символів. `sendEditMenu()` використовує list із 5–6 rows; webhook повинен зберігати підтримку `interactive.list_reply.id`, `interactive.button_reply.id` і legacy `button.payload`.
+
 ### Confirmation flow
+
+Confirmation серіалізується Redis claim `wa:confirmation:<phone>` з owner token, TTL, heartbeat, ownership fences і owner-only release. Лише owner надсилає повідомлення «Реєструємо вашу заявку…» та виконує зовнішні side effects. `busy` callback має завершуватися без додаткових WhatsApp-повідомлень або retry-menu. Handler, що втратив claim, не надсилає success/failure; recovery prompt допустимий лише після атомарного захоплення нового claim, перевірки актуального state та відсутності заявки в Sheets.
+
+WhatsApp delivery не має exactly-once гарантії: HTTP timeout може настати після фактичного прийняття повідомлення Meta. Не створювати суперечливі success/failure/retry повідомлення й не додавати глобальну message-ID дедуплікацію без окремого дизайну crash recovery.
 
 Single individual і military paths не рефакторити через multi. Single зберігає `request.documents`/`request.documentIndex`, один Sheets row і current Drive/profile behavior. Multi використовує `request.beneficiaries[]`; applicant (`request.data`), beneficiary і recipient — різні ролі. Beneficiary існує лише всередині request: його phone не є persistent identity, не використовується для profile lookup/save, а його documents не стають saved applicant documents.
 
@@ -53,14 +63,16 @@ Single individual і military paths не рефакторити через multi
 4. Для фізособи зберегти `wa:profile:<phone>`.
 5. Для ВЧ перемістити й перейменувати existing Drive files у `ВЧ/<номер ВЧ>/<фінальне ПІБ>/`, оновити document metadata у state та rich-text links у Sheets H.
 6. Для ВЧ лише після Drive/Sheets finalize зберегти незалежний persistent profile `wa:military-contact:<phone>`; номер ВЧ у нього не входить.
-7. Відправити WhatsApp success.
-8. Лише після цього викликати `resetUserState()`.
+7. Зробити одну best-effort спробу відправити WhatsApp success.
+8. Після завершення реєстрації викликати `resetUserState()`; помилка фінальної доставки логується й не запускає повторну реєстрацію.
 
 При Sheets, military Drive finalize або military Sheets H update failure state не очищати й success не надсилати. Retry не повинен дублювати Sheets row або Drive file: `applicationId` і `driveFileId` залишаються стабільними. Не генерувати `applicationId` приховано в `sendText` або `sendMessage`.
 
-Для individual multi порядок окремий і критичний: стабілізувати `applicationId`/`confirmedAt` → зберегти state → finalizувати existing Drive files за `driveFileId` у `ФІЗ/<фінальний applicant>/<фінальний beneficiary>/` → зберегти beneficiary metadata → завершити Sheets master/detail block, rich-text, clickable master ID і grouping → лише тоді `sheetsRecorded: true` → safe applicant profile handling → WhatsApp success → reset. До повного Drive/Sheets success state не очищати. `applicationId` не є Drive folder level; він входить у final multi filenames, а `driveFileId` не змінюється.
+Для individual multi порядок окремий і критичний: стабілізувати `applicationId`/`confirmedAt` → зберегти state → finalizувати existing Drive files за `driveFileId` у `ФІЗ/<фінальний applicant>/<фінальний beneficiary>/` → зберегти beneficiary metadata → завершити Sheets master/detail block, rich-text, clickable master ID і grouping → лише тоді `sheetsRecorded: true` → safe applicant profile handling → best-effort WhatsApp success → reset. До повного Drive/Sheets success state не очищати. `applicationId` не є Drive folder level; він входить у final multi filenames, а `driveFileId` не змінюється.
 
 Multi Sheets: один master row із real/clickable `applicationId` у B і N grouped detail rows із labels `Особа 1`, `Особа 2`, … у B. Detail labels не є application IDs і не отримують request-card links. Не ламати matrix-write/retry recovery або не включати master у row group.
+
+Запис single і multi в Sheets серіалізується окремим Redis lease `sheets:writer:<spreadsheetId>:<sheetId>` з heartbeat та ownership checks. Writer використовує `values.update()` з explicit range, не `values.append(... INSERT_ROWS)`. Multi master і details пишуться однією matrix operation; retry може відновити лише перевірений порожній suffix. Не перезаписувати непорожні сусідні rows, не створювати overlapping/nested groups і не виправляти неоднозначну production-структуру автоматично.
 
 Drive hierarchy не змішувати: ВЧ — `ВЧ/<номер ВЧ>/<ПІБ>/`; individual single — `ФІЗ/<ПІБ>/`; individual multi collection/finalization — `ФІЗ/<applicant>/<beneficiary>/`. Нові root-level `<beneficiary> — Особа N` folders створювати не можна. Military та single paths мають залишатися без змін.
 
@@ -70,11 +82,13 @@ Military та individual profiles мають окремі Redis keys і не п�
 
 `applicationId` має формат `YYYY-MM-NNNN`, де `YYYY-MM` фіксується один раз за `Europe/Kyiv` перед первинною генерацією, а `NNNN` — місячна послідовність `0001`–`9999`. Redis key: `requests:counter:YYYY-MM`. Перед атомарним виділенням номера враховується максимальний уже записаний sequence у всіх однойменних місячних spreadsheets; retry завжди використовує стабільний ID зі state. Sheets lookup перевіряє лише місяць, закодований в ID, обидві request-вкладки та всі однойменні spreadsheet-файли.
 
-Запис нових заявок у Sheets серіалізується Redis lease за `spreadsheetId + sheetId`. Writer визначає explicit вільний range, використовує `values.update()` без фізичного insert рядків, перевіряє порожність target rows і після запису верифікує master/detail labels. Multi group охоплює лише detail rows; overlapping або неоднозначні groups/data завершуються safe error без автоматичного видалення чи перезапису. Retry може дописати лише перевірений порожній suffix detail block і не перезаписує сусідній master.
-
 `api/request-card-links-test.js` — temporary repair endpoint, currently retained для відновлення clickable request-card links у вже існуючих Sheets rows; не видаляти випадково. Поточну роботу над production WhatsApp Business App + Cloud API Coexistence не змінювати без окремого запиту: onboarding ще не завершений.
 
 `api/meta/oauth-callback.js` потрібен для Meta-hosted Embedded Signup. Не додавати до нього token exchange, збереження OAuth code або зміну WhatsApp/webhook flow без окремо погодженої задачі.
+
+### Редагування і відновлення flow
+
+На `CONFIRMATION` кнопка `edit_request` переводить state у `EDIT_MENU` до надсилання меню; дані заявки не очищаються. `sendEditMenu()` — interactive list, а не набір із понад трьох reply buttons. Вибір поля використовує чинні IDs і повертає заявку до `CONFIRMATION` після редагування. `/menu` не скидає активний request: `resume_request` викликає `repeatCurrentPrompt()`, зокрема відновлює `EDIT_MENU`, document prompt і confirmation. Stale interactive buttons не повинні змінювати stage або втрачати дані.
 
 ## Secrets та environment variables
 
@@ -88,8 +102,10 @@ Military та individual profiles мають окремі Redis keys і не п�
 
 Не змінювати Vercel configuration, secrets або environment variables без явного запиту користувача.
 
+Не читати, змінювати, видаляти або «виправляти» production Redis/Sheets/Drive data без прямого дозволу, навіть якщо локальний код містить maintenance helper. Інтеграційні тести з реальними зовнішніми даними також потребують окремого погодження.
+
 ## Git і джерела істини
 
-Ніколи не створювати commit або push без явного погодження користувача. Ніколи не force-push. Перед commit перевірити `git status` і релевантний diff; не додавати сторонні або untracked файли без явного дозволу.
+Ніколи не створювати commit, push або deployment після звичайного завдання без окремої явної вказівки користувача. Ніколи не force-push. Перед commit перевірити `git status`, `git diff --check`, релевантний diff і тести; додавати лише погоджені файли. Перед push перевірити branch/HEAD. Звичайний production шлях — перевірений commit → push `main` → автоматичний Vercel deployment; ручний deployment не запускати без окремого дозволу.
 
 Код — authoritative source фактично реалізованої поведінки. `docs/PROJECT_CONTEXT.md` — detailed business/project context. Якщо вони різняться, зафіксувати discrepancy і не виправляти поведінку автоматично. User-facing WhatsApp-тексти та комунікація проєкту — українською, якщо користувач не попросив інакше.
