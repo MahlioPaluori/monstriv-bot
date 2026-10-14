@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
 import {
   acquireConfirmationClaim,
+  advanceDocumentStage,
+  beginDocumentUpload,
   CONFIRMATION_CLAIM_TTL_SECONDS,
-  claimMediaUpload,
+  completeDocumentUpload,
   createApplicationNumber,
   createUserState,
+  failDocumentUpload,
   getApplicantProfile,
   getMilitaryContactProfile,
   getUserState,
@@ -12,7 +15,7 @@ import {
   nextDocumentSequence,
   ownsConfirmationClaim,
   releaseConfirmationClaim,
-  releaseMediaUploadClaim,
+  renewDocumentUpload,
   renewConfirmationClaim,
   resetUserState,
   saveApplicantProfile,
@@ -43,12 +46,12 @@ import {
 } from "../lib/whatsapp.js";
 
 const PHYSICAL_DOCUMENTS = [
-  { key: "passport", label: "📕 Паспорт", uploadPrompt: "📸 Надішліть фото паспорта. Розмір кожного файлу — не більше 5 МБ." },
-  { key: "rnokpp", label: "🪪 РНОКПП (ідентифікаційний код)", uploadPrompt: "📸 Надішліть фото РНОКПП (ідентифікаційного коду). Розмір кожного файлу — не більше 5 МБ." },
-  { key: "military_id", label: "🎖 Військовий квиток / посвідчення", uploadPrompt: "📸 Надішліть фото військово-облікового документа. Розмір кожного файлу — не більше 5 МБ." },
-  { key: "ubd", label: "🏅 Посвідчення УБД", uploadPrompt: "📸 Надішліть фото посвідчення учасника бойових дій (УБД). Розмір кожного файлу — не більше 5 МБ.", optional: true },
+  { key: "passport", label: "📕 Паспорт", confirmationLabel: "📕 Паспорт", uploadPrompt: "📸 Надішліть фото паспорта. Розмір кожного файлу — не більше 5 МБ." },
+  { key: "rnokpp", label: "🪪 РНОКПП (ідентифікаційний код)", confirmationLabel: "🪪 РНОКПП", uploadPrompt: "📸 Надішліть фото РНОКПП (ідентифікаційного коду). Розмір кожного файлу — не більше 5 МБ." },
+  { key: "military_id", label: "🎖 Військовий квиток / посвідчення", confirmationLabel: "🎖 Військово-обліковий документ", uploadPrompt: "📸 Надішліть фото військово-облікового документа. Розмір кожного файлу — не більше 5 МБ." },
+  { key: "ubd", label: "🏅 Посвідчення УБД", confirmationLabel: "🏅 УБД", uploadPrompt: "📸 Надішліть фото посвідчення учасника бойових дій (УБД). Розмір кожного файлу — не більше 5 МБ.", optional: true },
 ];
-const MILITARY_UNIT_DOCUMENTS = [{ key: "official_request", label: "📄 Офіційний запит", uploadPrompt: "📸 Надішліть фото офіційного листа військової частини. Розмір кожного файлу — не більше 5 МБ." }];
+const MILITARY_UNIT_DOCUMENTS = [{ key: "official_request", label: "📄 Офіційний запит", confirmationLabel: "📄 Офіційний лист військової частини", uploadPrompt: "📸 Надішліть фото офіційного листа військової частини. Розмір кожного файлу — не більше 5 МБ." }];
 const MAX_MULTI_BENEFICIARIES = 5;
 const REQUIRED_PHYSICAL_DOCUMENT_KEYS = PHYSICAL_DOCUMENTS.filter((doc) => !doc.optional).map((doc) => doc.key);
 const MENU_COMMANDS = new Set(["/menu", "меню", "/start", "start", "старт"]);
@@ -64,6 +67,14 @@ function docs(state) { return state.request?.type === "military_unit" ? MILITARY
 function activeBeneficiary(state) { return state.request?.multiPackage ? state.request.beneficiaries?.[state.request.currentBeneficiaryIndex] || null : null; }
 function activeDocumentStore(state) { return activeBeneficiary(state) || state.request; }
 function currentDoc(state) { return docs(state)[activeDocumentStore(state).documentIndex || 0] || null; }
+export function formatDocumentSummary(documents, requestType = "individual") {
+  const definitions = requestType === "military_unit" ? MILITARY_UNIT_DOCUMENTS : PHYSICAL_DOCUMENTS;
+  const lines = definitions.flatMap((definition) => {
+    const files = documents?.[definition.key];
+    return Array.isArray(files) && files.length ? [`${definition.confirmationLabel} — ${files.length} фото`] : [];
+  });
+  return ["📎 Документи:", ...lines].join("\n");
+}
 function normalizePhone(value) {
   const compact = String(value || "").trim().replace(/[\s()-]/g, "");
   if (!/^\+?\d{7,15}$/.test(compact)) return null;
@@ -206,19 +217,27 @@ export async function restartRequestWithUnvalidatedDocuments(from, state, servic
 }
 
 export async function saveIncomingDocument(from, state, message, fileId, doc, services = {}) {
-  const claimUpload = services.claimMediaUpload || claimMediaUpload;
-  const releaseClaim = services.releaseMediaUploadClaim || releaseMediaUploadClaim;
+  const beginUpload = services.beginDocumentUpload || beginDocumentUpload;
+  const completeUpload = services.completeDocumentUpload || completeDocumentUpload;
+  const failUpload = services.failDocumentUpload || failDocumentUpload;
+  const renewUpload = services.renewDocumentUpload || renewDocumentUpload;
   const downloadMedia = services.downloadWhatsAppMedia || downloadWhatsAppMedia;
   const uploadDrive = services.uploadBufferToDrive || uploadBufferToDrive;
-  const persistState = services.saveUserState || saveUserState;
   const getApplicantFolder = services.getOrCreateApplicantFolder || getOrCreateApplicantFolder;
   const getMultiFolder = services.getOrCreateIndividualMultiBeneficiaryFolder || getOrCreateIndividualMultiBeneficiaryFolder;
   const nextSequence = services.nextDocumentSequence || nextDocumentSequence;
-  const claimed = await claimUpload(from, fileId);
-  if (!claimed) return false;
+  const beneficiary = activeBeneficiary(state);
+  const documentIndex = activeDocumentStore(state).documentIndex || 0;
+  const beneficiaryIndex = beneficiary ? state.request.currentBeneficiaryIndex : null;
+  const uploadId = message.id || fileId;
+  const beginStatus = await beginUpload(from, uploadId, { documentIndex, beneficiaryIndex, documentKey: doc.key });
+  if (beginStatus !== "STARTED") return { status: String(beginStatus).toLowerCase() };
+  const heartbeat = setInterval(() => {
+    renewUpload(from, uploadId).catch((error) => console.error("Document upload lease renewal failed:", error?.message || "Unknown error"));
+  }, 30_000);
+  heartbeat.unref?.();
   try {
     const media = await downloadMedia(fileId);
-    const beneficiary = activeBeneficiary(state);
     let folder;
     if (beneficiary) {
       folder = await getMultiFolder(state.request.data.name, beneficiary.name);
@@ -233,14 +252,16 @@ export async function saveIncomingDocument(from, state, message, fileId, doc, se
     if (!extension || !media.validation) throw new MediaValidationError("INVALID_MEDIA", "Validated media metadata is missing");
     const fileName = `${doc.key}${sequence}${extension}`;
     const driveFile = await uploadDrive({ buffer: media.buffer, name: fileName, mimeType: media.mimeType, parentId: folder.id });
-    const store = activeDocumentStore(state);
-    if (!store.documents[doc.key]) store.documents[doc.key] = [];
-    store.documents[doc.key].push({ mediaId: fileId, type: message.type, receivedAt: new Date().toISOString(), driveFileId: driveFile.id, driveUrl: driveFile.webViewLink || `https://drive.google.com/file/d/${driveFile.id}/view`, fileName: driveFile.name, mimeType: media.mimeType, fileSize: media.fileSize, validation: media.validation });
-    await persistState(from, state);
-    return true;
+    const document = { mediaId: fileId, type: message.type, receivedAt: new Date().toISOString(), driveFileId: driveFile.id, driveUrl: driveFile.webViewLink || `https://drive.google.com/file/d/${driveFile.id}/view`, fileName: driveFile.name, mimeType: media.mimeType, fileSize: media.fileSize, validation: media.validation };
+    const result = await completeUpload(from, uploadId, { documentIndex, beneficiaryIndex, documentKey: doc.key, document });
+    if (result.state) Object.assign(state, result.state);
+    if (result.status !== "ADDED") return { status: String(result.status).toLowerCase(), count: result.count || 0 };
+    return { status: "added", count: result.count, document };
   } catch (error) {
-    await releaseClaim(from, fileId);
+    await failUpload(from, uploadId);
     throw error;
+  } finally {
+    clearInterval(heartbeat);
   }
 }
 
@@ -251,19 +272,7 @@ async function showConfirmation(from, state) {
   }
   state.stage = "CONFIRMATION";
   await saveUserState(from, state);
-  if (state.request.multiPackage) {
-    const { data, beneficiaries } = state.request;
-    await sendText(from, ["Перевірте, будь ласка, дані заявки:", "", "Заявник:", `ПІБ: ${data.name || "—"}`, `Телефон: ${data.phone || from}`, "", "Потреба:", data.need || "—", "", "Особи та документи:"].join("\n"));
-    for (let index = 0; index < beneficiaries.length; index += 1) {
-      const beneficiary = beneficiaries[index];
-      const documentLines = PHYSICAL_DOCUMENTS.map((doc) => {
-        const count = beneficiary.documents?.[doc.key]?.length || 0;
-        return `${doc.label.replace(/^\S+\s/, "")}: ${count ? `завантажено (${count})` : "не додано"}`;
-      });
-      await sendText(from, [`Особа ${index + 1}:`, `ПІБ: ${beneficiary.name}`, `Телефон: ${beneficiary.phone}`, ...documentLines].join("\n"));
-    }
-    await sendText(from, ["Доставка:", `Місто: ${data.city || "—"}`, `Нова пошта: ${data.novaPoshtaBranch || "—"}`, data.recipientAnotherPerson ? "Отримувач: інша особа" : "Отримувач: заявник", ...(data.recipientAnotherPerson ? [`ПІБ отримувача: ${data.recipientName || "—"}`, `Телефон отримувача: ${data.recipientPhone || "—"}`] : [])].join("\n"));
-  } else await sendText(from, summary(state));
+  for (const message of buildConfirmationMessages(from, state)) await sendText(from, message);
   await sendYesNoMenu(from, "Підтвердити заявку?", "confirm_request", "edit_request");
 }
 
@@ -353,15 +362,49 @@ async function askDocument(from, state) {
   }
   await sendText(from, `${doc.uploadPrompt}\n\nМожна надіслати один або кілька файлів/фото цього документа. Після того як усе надіслано, натисніть «Готово».`);
 }
-function summary(state) {
+
+export async function advanceCurrentDocument(from, state, doc, requireFiles, services = {}) {
+  const advance = services.advanceDocumentStage || advanceDocumentStage;
+  const notify = services.sendText || sendText;
+  const continueFlow = services.askDocument || askDocument;
+  const store = activeDocumentStore(state);
+  const result = await advance(from, {
+    documentIndex: store.documentIndex || 0,
+    beneficiaryIndex: state.request.multiPackage ? state.request.currentBeneficiaryIndex : null,
+    documentKey: doc.key,
+    requireFiles,
+  });
+  if (result.status === "BUSY") {
+    await notify(from, "Ще триває завантаження файлу. Зачекайте на підтвердження його отримання та натисніть «Готово» ще раз.");
+    return result;
+  }
+  if (result.status === "EMPTY") {
+    await notify(from, `Спочатку виконайте цей крок:\n\n${doc.uploadPrompt}`);
+    return result;
+  }
+  if (result.status !== "ADVANCED") return result;
+  Object.assign(state, result.state);
+  await continueFlow(from, state);
+  return result;
+}
+export function formatConfirmationSummary(state) {
   const r = state.request || {}, d = r.data || {};
-  const count = Object.values(r.documents || {}).reduce((n, files) => n + (Array.isArray(files) ? files.length : 0), 0);
   const lines = ["Перевірте, будь ласка, дані заявки:", "", `Тип заявника: ${r.type === "individual" ? "Фізична особа" : "Військова частина"}`, `ПІБ: ${d.name || "—"}`, `Телефон: ${d.phone || state.phone || "—"}`];
   if (r.type === "military_unit") lines.push(`Номер військової частини: ${d.militaryUnitNumber || "—"}`);
   lines.push(`Місто: ${d.city || "—"}`, `Відділення Нової пошти: ${d.novaPoshtaBranch || "—"}`, d.recipientAnotherPerson ? `Отримувач: ${d.recipientName || "—"}` : "Отримувач: заявник");
   if (d.recipientAnotherPerson) lines.push(`Телефон отримувача: ${d.recipientPhone || "—"}`);
-  lines.push(`Документів отримано: ${count}`, "", `Потреба: ${d.need || "—"}`, "", "Якщо все правильно, підтвердіть заявку.");
+  lines.push("", formatDocumentSummary(r.documents, r.type), "", `Потреба: ${d.need || "—"}`, "", "Якщо все правильно, підтвердіть заявку.");
   return lines.join("\n");
+}
+
+export function buildConfirmationMessages(from, state) {
+  if (!state.request?.multiPackage) return [formatConfirmationSummary(state)];
+  const { data, beneficiaries } = state.request;
+  return [
+    ["Перевірте, будь ласка, дані заявки:", "", "Заявник:", `ПІБ: ${data.name || "—"}`, `Телефон: ${data.phone || from}`, "", "Потреба:", data.need || "—", "", "Особи та документи:"].join("\n"),
+    ...beneficiaries.map((beneficiary, index) => [`Особа ${index + 1}:`, `ПІБ: ${beneficiary.name}`, `Телефон: ${beneficiary.phone}`, "", formatDocumentSummary(beneficiary.documents)].join("\n")),
+    ["Доставка:", `Місто: ${data.city || "—"}`, `Нова пошта: ${data.novaPoshtaBranch || "—"}`, data.recipientAnotherPerson ? "Отримувач: інша особа" : "Отримувач: заявник", ...(data.recipientAnotherPerson ? [`ПІБ отримувача: ${data.recipientName || "—"}`, `Телефон отримувача: ${data.recipientPhone || "—"}`] : [])].join("\n"),
+  ];
 }
 async function recipientChoice(from, state, another) {
   state.request.data.recipientAnotherPerson = another;
@@ -406,7 +449,7 @@ export async function repeatCurrentPrompt(from, state, services = {}) {
     const hasFiles = Boolean(doc && store?.documents?.[doc.key]?.length);
     if (hasFiles) {
       const context = state.request?.multiPackage ? { beneficiaryIndex: state.request.currentBeneficiaryIndex, documentKey: doc.key } : null;
-      return sendDocumentDone(from, doc.label, Boolean(doc.optional), context, true);
+      return sendDocumentDone(from, doc.label, store.documents[doc.key].length, Boolean(doc.optional), context);
     }
     return askDocument(from, state);
   }
@@ -907,7 +950,9 @@ export default async function handler(req, res) {
       const store = activeDocumentStore(state); const multiContext = state.request.multiPackage ? { beneficiaryIndex: state.request.currentBeneficiaryIndex, documentKey: doc.key } : null;
       if (fileId) {
         try {
-          const uploaded = await saveIncomingDocument(from, state, message, fileId, doc); if (!uploaded) return res.status(200).send("EVENT_RECEIVED"); await sendDocumentDone(from, doc.label, Boolean(doc.optional), multiContext);
+          const upload = await saveIncomingDocument(from, state, message, fileId, doc);
+          if (upload.status !== "added") return res.status(200).send("EVENT_RECEIVED");
+          await sendDocumentDone(from, doc.label, upload.count, Boolean(doc.optional), multiContext);
         } catch (error) {
           if (!(error instanceof MediaValidationError)) throw error;
           await sendText(from, error.userMessage);
@@ -918,8 +963,11 @@ export default async function handler(req, res) {
       if (state.request.multiPackage && buttonId?.startsWith("document_") && (!parsedButton || parsedButton.beneficiaryIndex !== state.request.currentBeneficiaryIndex || parsedButton.documentKey !== doc.key)) return res.status(200).send("EVENT_RECEIVED");
       const donePressed = state.request.multiPackage ? parsedButton?.action === "done" : buttonId === "document_done";
       const skipPressed = state.request.multiPackage ? parsedButton?.action === "skip" : buttonId === "document_skip";
-      if (donePressed) { const files = store.documents[doc.key] || []; if (!files.length) { await sendText(from, `Спочатку виконайте цей крок:\n\n${doc.uploadPrompt}`); return res.status(200).send("EVENT_RECEIVED"); } store.documentIndex += 1; await saveUserState(from, state); await askDocument(from, state); return res.status(200).send("EVENT_RECEIVED"); }
-      if (skipPressed && doc.optional) { store.documentIndex += 1; await saveUserState(from, state); await askDocument(from, state); return res.status(200).send("EVENT_RECEIVED"); }
+      if (donePressed || (skipPressed && doc.optional)) {
+        const result = await advanceCurrentDocument(from, state, doc, donePressed);
+        if (result.status !== "ADVANCED" && result.status !== "BUSY" && result.status !== "EMPTY") await repeatCurrentPrompt(from, result.state || state);
+        return res.status(200).send("EVENT_RECEIVED");
+      }
     }
     if (state.stage === "CITY" && text) { state.request.data.city = text; state.stage = "NOVA_POSHTA_BRANCH"; await saveUserState(from, state); await sendText(from, "Вкажіть, будь ласка, номер або адресу відділення Нової пошти."); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "NOVA_POSHTA_BRANCH" && text) { state.request.data.novaPoshtaBranch = text; state.stage = "RECIPIENT_CHOICE"; await saveUserState(from, state); await sendYesNoMenu(from, "Чи буде отримувачем інша особа?", "recipient_other_yes", "recipient_other_no"); return res.status(200).send("EVENT_RECEIVED"); }

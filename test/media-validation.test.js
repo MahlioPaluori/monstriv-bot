@@ -119,8 +119,8 @@ test("rejected media never reaches Drive or mutates request documents", async ()
   const state = { request: { type: "individual", data: { name: "Applicant" }, documents: {}, documentIndex: 0 } };
   let driveUploads = 0;
   await assert.rejects(saveIncomingDocument("phone", state, { type: "document" }, "media", { key: "passport" }, {
-    claimMediaUpload: async () => true,
-    releaseMediaUploadClaim: async () => {},
+    beginDocumentUpload: async () => "STARTED",
+    failDocumentUpload: async () => {},
     downloadWhatsAppMedia: async () => { throw new MediaValidationError("INVALID_MEDIA", "bad file"); },
     uploadBufferToDrive: async () => { driveUploads += 1; },
   }), { code: "INVALID_MEDIA" });
@@ -134,13 +134,16 @@ test("successful upload stores validation metadata and canonical extension", asy
   const validation = validateMediaBuffer(buffer, "image/jpeg");
   let uploadedName;
   await saveIncomingDocument("phone", state, { type: "document", document: { filename: "malware.exe" } }, "media", { key: "passport" }, {
-    claimMediaUpload: async () => true,
-    releaseMediaUploadClaim: async () => {},
+    beginDocumentUpload: async () => "STARTED",
+    failDocumentUpload: async () => {},
     downloadWhatsAppMedia: async () => ({ buffer, mimeType: "image/jpeg", fileSize: buffer.length, extension: ".jpg", validation }),
     getOrCreateApplicantFolder: async () => ({ id: "folder" }),
     nextDocumentSequence: async () => 1,
     uploadBufferToDrive: async ({ name }) => { uploadedName = name; return { id: "drive", name, webViewLink: "https://drive.test/file" }; },
-    saveUserState: async () => {},
+    completeDocumentUpload: async (_phone, _uploadId, { document }) => {
+      state.request.documents.passport = [document];
+      return { status: "ADDED", count: 1, state };
+    },
   });
   assert.equal(uploadedName, "passport1.jpg");
   assert.equal(state.request.documents.passport[0].validation.version, 1);
