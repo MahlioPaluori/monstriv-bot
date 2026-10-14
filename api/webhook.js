@@ -924,7 +924,7 @@ export default async function handler(req, res) {
         const reuse = prepareSavedDocumentsForReuse(profile.documents);
         state.request.type = "individual"; state.request.data = { ...(profile.data || {}), phone: from }; state.request.documents = reuse.documents; state.request.documentIndex = 0; state.request.savedDocumentsUpdatedAt = profile.lastDocumentsUpdatedAt; state.request.usingSavedData = true; state.request.legacyDocumentsRequireUpload = reuse.legacyDocumentsRequireUpload; state.stage = "REQUEST_TYPE"; await saveUserState(from, state);
         if (state.request.legacyDocumentsRequireUpload) await sendText(from, "Збережені раніше документи не мають нової перевірки безпеки, тому їх потрібно завантажити повторно. Збережені контактні дані залишаться доступними.");
-        await sendText(from, "Збережені дані використано. Тепер напишіть, будь ласка, який саме запит ви хочете подати."); return res.status(200).send("EVENT_RECEIVED");
+        await sendText(from, "Збережені дані використано. Тепер, напишіть, будь ласка, що Вам потрібно"); return res.status(200).send("EVENT_RECEIVED");
       }
       if (buttonId === "enter_data_again") { state.request = { type: "individual", data: { phone: from }, documents: {}, documentIndex: 0 }; state.stage = "IDENTIFICATION"; await saveUserState(from, state); await sendText(from, "Введіть, будь ласка, ПІБ заново."); return res.status(200).send("EVENT_RECEIVED"); }
       await sendReturningApplicantMenu(from, profile.lastDocumentsUpdatedAt); return res.status(200).send("EVENT_RECEIVED");
