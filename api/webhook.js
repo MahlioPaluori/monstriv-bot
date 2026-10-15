@@ -55,6 +55,7 @@ const MILITARY_UNIT_DOCUMENTS = [{ key: "official_request", label: "📄 Офі�
 const MAX_MULTI_BENEFICIARIES = 5;
 const REQUIRED_PHYSICAL_DOCUMENT_KEYS = PHYSICAL_DOCUMENTS.filter((doc) => !doc.optional).map((doc) => doc.key);
 const MENU_COMMANDS = new Set(["/menu", "меню", "/start", "start", "старт"]);
+const ICE_BREAKER_TEXT = "розпочати розмову";
 const EDIT_FIELD_PROMPTS = {
   name: "Введіть нове ПІБ.",
   need: "Введіть новий опис запиту.",
@@ -291,6 +292,18 @@ function confirmationLog(event, request, details = {}) {
 
 function isMenuCommand(text) {
   return MENU_COMMANDS.has(String(text || "").trim().toLowerCase());
+}
+
+function hasActiveRequest(state) {
+  return Boolean(state?.request) && !["NEW", "MAIN_MENU", "OPERATOR", "CONFIRMED"].includes(state.stage);
+}
+
+export async function handleIceBreakerMessage(from, text, state, services = {}) {
+  const normalizedText = String(text || "").trim().replace(/\s+/g, " ").toLocaleLowerCase("uk-UA");
+  if (normalizedText !== ICE_BREAKER_TEXT) return false;
+  if (hasActiveRequest(state)) await (services.sendActiveRequestNavigation || sendActiveRequestNavigation)(from);
+  else await (services.sendMainMenu || sendMainMenu)(from);
+  return true;
 }
 
 export async function handleDocumentStageFallback(from, state, input, services = {}) {
@@ -847,6 +860,7 @@ export default async function handler(req, res) {
       await resetUserState(from); await sendText(from, "Тестову сесію скинуто. Починаємо заново."); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
     }
     let state = await getUserState(from);
+    if (!state && await handleIceBreakerMessage(from, text, state)) return res.status(200).send("EVENT_RECEIVED");
     if (!state && buttonId === "confirm_request") return res.status(200).send("EVENT_RECEIVED");
     if (!state) {
       state = await createUserState(from); state.request = { data: { phone: from }, documents: {}, documentIndex: 0 };
@@ -861,6 +875,7 @@ export default async function handler(req, res) {
       state.stage = "MAIN_MENU";
     }
     if (await restartRequestWithUnvalidatedDocuments(from, state)) return res.status(200).send("EVENT_RECEIVED");
+    if (await handleIceBreakerMessage(from, text, state)) return res.status(200).send("EVENT_RECEIVED");
     if (await handleDocumentStageFallback(from, state, { message, text, buttonId, fileId })) return res.status(200).send("EVENT_RECEIVED");
     if (!text && !buttonId && !fileId) {
       if (state.stage === "MULTI_APPLICANT_INCLUDED" || state.stage === "MULTI_SAVED_DOCUMENTS_DECISION") {
@@ -888,14 +903,14 @@ export default async function handler(req, res) {
       await sendCancelRequestConfirmation(from); return res.status(200).send("EVENT_RECEIVED");
     }
 
-    const hasActiveRequest = !["NEW", "MAIN_MENU", "OPERATOR", "CONFIRMED"].includes(state.stage) && Boolean(state.request);
-    if (hasActiveRequest && isMenuCommand(text)) { await sendActiveRequestNavigation(from); return res.status(200).send("EVENT_RECEIVED"); }
-    if (hasActiveRequest && buttonId === "resume_request") { await repeatCurrentPrompt(from, state); return res.status(200).send("EVENT_RECEIVED"); }
-    if (hasActiveRequest && buttonId === "cancel_request") {
+    const activeRequest = hasActiveRequest(state);
+    if (activeRequest && isMenuCommand(text)) { await sendActiveRequestNavigation(from); return res.status(200).send("EVENT_RECEIVED"); }
+    if (activeRequest && buttonId === "resume_request") { await repeatCurrentPrompt(from, state); return res.status(200).send("EVENT_RECEIVED"); }
+    if (activeRequest && buttonId === "cancel_request") {
       state.cancelReturnStage = state.stage; state.stage = "CANCEL_CONFIRMATION"; await saveUserState(from, state);
       await sendCancelRequestConfirmation(from); return res.status(200).send("EVENT_RECEIVED");
     }
-    if (hasActiveRequest && buttonId && !isValidButtonForStage(state, buttonId)) {
+    if (activeRequest && buttonId && !isValidButtonForStage(state, buttonId)) {
       await sendText(from, "Ця кнопка вже не актуальна. Продовжимо з поточного кроку.");
       await repeatCurrentPrompt(from, state); return res.status(200).send("EVENT_RECEIVED");
     }
