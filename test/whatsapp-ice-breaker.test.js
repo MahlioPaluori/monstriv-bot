@@ -13,7 +13,7 @@ function navigationServices(calls) {
 test("Ice Breaker shows the main menu for a new user without creating state", async () => {
   const calls = [];
 
-  assert.equal(await handleIceBreakerMessage("new-user", "Розпочати розмову", null, navigationServices(calls)), true);
+  assert.equal(await handleIceBreakerMessage("new-user", "Натисніть на це повідомлення, щоб почати", null, navigationServices(calls)), true);
   assert.deepEqual(calls, [["main", "new-user"]]);
 });
 
@@ -22,7 +22,7 @@ test("Ice Breaker shows the main menu for a returning user without an active req
   const snapshot = structuredClone(state);
   const calls = [];
 
-  assert.equal(await handleIceBreakerMessage("returning-user", "  РОЗПОЧАТИ   РОЗМОВУ  ", state, navigationServices(calls)), true);
+  assert.equal(await handleIceBreakerMessage("returning-user", "  НАТИСНІТЬ  НА ЦЕ   ПОВІДОМЛЕННЯ, ЩОБ  ПОЧАТИ  ", state, navigationServices(calls)), true);
   assert.deepEqual(calls, [["main", "returning-user"]]);
   assert.deepEqual(state, snapshot);
 });
@@ -35,14 +35,15 @@ test("Ice Breaker shows active-request navigation without changing request state
   const snapshot = structuredClone(state);
   const calls = [];
 
-  assert.equal(await handleIceBreakerMessage("active-user", " розпочати  РОЗМОВУ ", state, navigationServices(calls)), true);
+  assert.equal(await handleIceBreakerMessage("active-user", " натисніть на це  ПОВІДОМЛЕННЯ, щоб почати ", state, navigationServices(calls)), true);
   assert.deepEqual(calls, [["active", "active-user"]]);
   assert.deepEqual(state, snapshot);
 });
 
-test("other text is ignored by the Ice Breaker handler", async () => {
+test("the previous Ice Breaker text and other text are ignored", async () => {
   const calls = [];
 
+  assert.equal(await handleIceBreakerMessage("user", "Розпочати розмову", null, navigationServices(calls)), false);
   assert.equal(await handleIceBreakerMessage("user", "Розпочати заявку", null, navigationServices(calls)), false);
   assert.deepEqual(calls, []);
 });

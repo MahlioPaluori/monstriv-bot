@@ -55,7 +55,7 @@ const MILITARY_UNIT_DOCUMENTS = [{ key: "official_request", label: "📄 Офі�
 const MAX_MULTI_BENEFICIARIES = 5;
 const REQUIRED_PHYSICAL_DOCUMENT_KEYS = PHYSICAL_DOCUMENTS.filter((doc) => !doc.optional).map((doc) => doc.key);
 const MENU_COMMANDS = new Set(["/menu", "меню", "/start", "start", "старт"]);
-const ICE_BREAKER_TEXT = "розпочати розмову";
+const ICE_BREAKER_TEXT = "натисніть на це повідомлення, щоб почати";
 const EDIT_FIELD_PROMPTS = {
   name: "Введіть нове ПІБ.",
   need: "Введіть новий опис запиту.",
