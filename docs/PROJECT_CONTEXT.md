@@ -150,11 +150,11 @@ APPLICANT_TYPE
 
 Отже після `official_request` ВЧ **не** переходить напряму до confirmation. Delivery fields для ВЧ використовують ті самі states, що й фізособа, і доступні в edit flow.
 
-Після першої успішно підтвердженої ВЧ-заявки persistent profile `wa:military-contact:<phone>` зберігає canonical ПІБ відповідальної особи. Номер ВЧ у profile не входить. При наступному виборі ВЧ з того самого phone бот автоматично встановлює збережене ПІБ і переходить прямо до `MILITARY_UNIT_NUMBER`. Якщо у confirmation через `edit_name` введено інше ПІБ, після успішного підтвердження саме воно стає новим canonical name.
+Після першої успішно підтвердженої ВЧ-заявки persistent profile `wa:military-contact:<phone>` зберігає canonical ПІБ відповідальної особи. Номер ВЧ у profile не входить. При наступному виборі ВЧ з того самого phone бот автоматично встановлює збережене ПІБ і переходить прямо до `MILITARY_UNIT_NUMBER`. Після введення номера ВЧ бот переходить у `REQUEST_TYPE` і показує той самий prompt потреби, що й для фізособи: «Дякуємо. Тепер, напишіть, будь ласка, що Вам потрібно». Якщо у confirmation через `edit_name` введено інше ПІБ, після успішного підтвердження саме воно стає новим canonical name.
 
 ### Confirmation
 
-Single/ВЧ summary показує тип, ПІБ, телефон, номер ВЧ (за потреби), delivery, кількість documents і need. Multi summary надсилається частинами: applicant/need, окремий блок кожного beneficiary зі статусом/кількістю documents, потім спільний delivery block; confirmation buttons з'являються після останньої частини. Користувач підтверджує або переходить до edit flow.
+Single/ВЧ summary показує тип, ПІБ, телефон, номер ВЧ (за потреби), delivery, кількість documents і need. Multi summary надсилається частинами: applicant/need, окремий блок кожного beneficiary зі статусом/кількістю documents, потім спільний delivery block; confirmation buttons «Так» (`confirm_request`) і «Редагувати» (`edit_request`) з'являються після останньої частини. Користувач підтверджує або переходить до edit flow.
 
 Перед зовнішніми confirmation operations handler атомарно захоплює Redis claim `wa:confirmation:<phone>` з унікальним owner token. TTL поновлюється heartbeat; ownership перевіряється навколо зовнішніх side effects, а release виконується лише owner. Після першого успішного claim користувач один раз отримує «⏳ Реєструємо вашу заявку. Будь ласка, зачекайте на підтвердження.». Конкурентний/повторний callback із `busy` не запускає другу обробку й не надсилає retry або failure messages.
 
@@ -162,7 +162,7 @@ Single/ВЧ summary показує тип, ПІБ, телефон, номер В
 
 ### Редагування і навігація
 
-На confirmation «Ні» (`edit_request`) зберігає `stage = EDIT_MENU` і відкриває WhatsApp interactive list. List має один section і 5 полів для individual single, 6 для individual multi (`edit_beneficiary`) або military (`edit_unit_number`); row IDs не змінені. Webhook нормалізує `interactive.list_reply.id`, `interactive.button_reply.id` і legacy `button.payload`. Після зміни поля `showConfirmation()` знову зберігає `CONFIRMATION` і показує актуальне зведення; зміна applicant name синхронізує beneficiary №1, якщо `isApplicant === true`.
+На confirmation «Редагувати» (`edit_request`) зберігає `stage = EDIT_MENU` і відкриває WhatsApp interactive list. Змінився лише видимий label колишньої кнопки «Ні»: callback ID та business behavior лишилися незмінними. List має один section і 5 полів для individual single, 6 для individual multi (`edit_beneficiary`) або military (`edit_unit_number`); row IDs не змінені. Webhook нормалізує `interactive.list_reply.id`, `interactive.button_reply.id` і legacy `button.payload`. Після зміни поля `showConfirmation()` знову зберігає `CONFIRMATION` і показує актуальне зведення; зміна applicant name синхронізує beneficiary №1, якщо `isApplicant === true`.
 
 Команди `/menu`, `start`/`/start` і `старт` не скидають активну заявку: користувач отримує navigation menu з `resume_request` і `cancel_request`. `resume_request` відновлює prompt поточного stage, включно з `EDIT_MENU`, документами, recipient choice та confirmation. Відмова від cancel повертає exact попередній stage; підтверджений cancel очищає request state і тимчасові document/media sequence keys, а persistent applicant і military-contact profiles залишаються.
 
@@ -443,7 +443,7 @@ Operator handoff залишається high priority, але залежить �
 - master/detail rows і group лише для detail rows перевірені в Google Sheets;
 - confirmation UX показує спочатку повідомлення про обробку, потім success, без суперечливих busy/retry messages;
 - спостережуваний час однієї реєстрації — приблизно 25–30 секунд; це не SLA, не timeout і не гарантія;
-- «Ні» на confirmation відкриває list menu редагування;
+- callback `edit_request` на confirmation відкриває list menu редагування; під час цієї ручної перевірки кнопка ще мала label «Ні», поточний UI показує «Редагувати»;
 - редагування полів і збереження змін перевірені;
 - ВЧ-заявка зі збереженим canonical contact name працює;
 - ВЧ-заявка зі збереженим отримувачем працює;
@@ -452,7 +452,7 @@ Operator handoff залишається high priority, але залежить �
 
 ### Автоматизовані локальні перевірки
 
-На момент завершення Secure Media Upload `node --test` проходив 68/68 тестів. Suite включає media validation і bounded download, legacy Redis-state safeguards, document prompts, confirmation claims/lifecycle, application ID allocation, Drive-copy idempotency mocks, Sheets writer/master-detail recovery, edit-menu list payload і navigation recovery. Це mock/local coverage, а не підтвердження доступності чи exactly-once поведінки зовнішніх сервісів; production-перевірка Secure Media Upload зафіксована окремо вище.
+На момент завершення Secure Media Upload `node --test` проходив 68/68 тестів. Після подальших regression tests для document concurrency, request-card documents, confirmation labels і navigation актуальний локальний suite станом на 15.10.2026 проходить 94/94. Suite включає media validation і bounded download, legacy Redis-state safeguards, document prompts, confirmation claims/lifecycle, application ID allocation, Drive-copy idempotency mocks, Sheets writer/master-detail recovery, edit-menu/list payload, confirmation button labels і navigation recovery. Це mock/local coverage, а не підтвердження доступності чи exactly-once поведінки зовнішніх сервісів; production-перевірка Secure Media Upload зафіксована окремо вище.
 
 Інші сценарії не слід вважати ручно перевіреними лише на підставі коду або mock-тестів.
 
@@ -493,7 +493,7 @@ Operator handoff залишається high priority, але залежить �
 Актуальний code HEAD перед локальним documentation update:
 
 ```text
-889f7d4 security: validate WhatsApp media uploads and enforce file limits
+6c7b3fa fix: align military request prompt with individual flow
 ```
 
-Останні milestones: multi saved-applicant document reuse і safe confirmation (`c24a2e9`), Kyiv monthly application IDs (`a96ab97`), Redis-serialized explicit-range Sheets writer (`2f57721`), suppression conflicting confirmation messages (`ff0dffb`), WhatsApp list edit menu (`d264820`) та Secure Media Upload із legacy-state fail-closed enforcement (`889f7d4`). Раніше реалізовано military contact profile, clickable request-card IDs, first-contact UX, military Drive/Sheets finalization, individual multi flow, printable multi request card і Meta Embedded Signup callback.
+Останні milestones: multi saved-applicant document reuse і safe confirmation (`c24a2e9`), Kyiv monthly application IDs (`a96ab97`), Redis-serialized explicit-range Sheets writer (`2f57721`), suppression conflicting confirmation messages (`ff0dffb`), WhatsApp list edit menu (`d264820`), Secure Media Upload із legacy-state fail-closed enforcement (`889f7d4`), уточнений label confirmation-кнопки «Редагувати» (`23b2fbb`) та уніфікований prompt потреби для ВЧ й фізособи (`6c7b3fa`). Раніше реалізовано military contact profile, clickable request-card IDs, first-contact UX, military Drive/Sheets finalization, individual multi flow, printable multi request card і Meta Embedded Signup callback.

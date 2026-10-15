@@ -88,7 +88,7 @@ Multi Sheets: один master row із real/clickable `applicationId` у B і N 
 
 Drive hierarchy не змішувати: ВЧ — `ВЧ/<номер ВЧ>/<ПІБ>/`; individual single — `ФІЗ/<ПІБ>/`; individual multi collection/finalization — `ФІЗ/<applicant>/<beneficiary>/`. Нові root-level `<beneficiary> — Особа N` folders створювати не можна. Military та single paths мають залишатися без змін.
 
-Military та individual profiles мають окремі Redis keys і не перезаписують один одного. Returning military contact автоматично використовує canonical ПІБ і все одно щоразу вводить номер ВЧ; фінальний підтверджений `edit_name` оновлює canonical profile.
+Military та individual profiles мають окремі Redis keys і не перезаписують один одного. Returning military contact автоматично використовує canonical ПІБ і все одно щоразу вводить номер ВЧ; фінальний підтверджений `edit_name` оновлює canonical profile. Після введення номера ВЧ stage `REQUEST_TYPE` використовує той самий prompt потреби, що й individual flow: «Дякуємо. Тепер, напишіть, будь ласка, що Вам потрібно».
 
 У Sheets visible значення колонки B залишається exact `applicationId`, але production writer автоматично додає clickable signed request-card link для кожної нової заявки. Не дублювати signing logic поза `buildRequestCardUrl()`.
 
@@ -98,7 +98,7 @@ Military та individual profiles мають окремі Redis keys і не п�
 
 ### Редагування і відновлення flow
 
-На `CONFIRMATION` кнопка `edit_request` переводить state у `EDIT_MENU` до надсилання меню; дані заявки не очищаються. `sendEditMenu()` — interactive list, а не набір із понад трьох reply buttons. Вибір поля використовує чинні IDs і повертає заявку до `CONFIRMATION` після редагування. `/menu` не скидає активний request: `resume_request` викликає `repeatCurrentPrompt()`, зокрема відновлює `EDIT_MENU`, document prompt і confirmation. Stale interactive buttons не повинні змінювати stage або втрачати дані.
+На `CONFIRMATION` кнопка з видимим текстом «Редагувати» і callback ID `edit_request` переводить state у `EDIT_MENU` до надсилання меню; кнопка підтвердження лишається «Так» (`confirm_request`), а дані заявки не очищаються. Не повертати для `edit_request` неоднозначний label «Ні» і не змінювати callback IDs. `sendEditMenu()` — interactive list, а не набір із понад трьох reply buttons. Вибір поля використовує чинні IDs і повертає заявку до `CONFIRMATION` після редагування. `/menu` не скидає активний request: `resume_request` викликає `repeatCurrentPrompt()`, зокрема відновлює `EDIT_MENU`, document prompt і confirmation. Stale interactive buttons не повинні змінювати stage або втрачати дані.
 
 ## Secrets та environment variables
 
