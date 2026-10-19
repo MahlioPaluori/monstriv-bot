@@ -6,6 +6,9 @@
   "engines": {
     "node": ">=20"
   },
+  "scripts": {
+    "sheets:migrate-category": "node scripts/migrate-google-sheets-category.js"
+  },
   "dependencies": {
     "googleapis": "^160.0.0",
     "redis": "^5.9.0"
