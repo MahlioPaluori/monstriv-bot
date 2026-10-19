@@ -31,6 +31,20 @@ function validSpreadsheetId(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{10,200}$/.test(value);
 }
 
+function safeMigrationError(error) {
+  const rawStatus = error?.response?.status ?? error?.code;
+  const httpCode = Number.isInteger(Number(rawStatus)) ? Number(rawStatus) : null;
+  const rawMessage = error?.response?.data?.error?.message;
+  const googleMessage = typeof rawMessage === "string"
+    ? rawMessage.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 500)
+    : "No Google API message";
+  return {
+    stage: typeof error?.migrationStage === "string" ? error.migrationStage : "unknown",
+    httpCode,
+    googleMessage,
+  };
+}
+
 function publicReport(report) {
   return {
     mode: report.mode,
@@ -114,7 +128,7 @@ export function createGoogleSheetsMigrationHandler({
       claimAcquired = false;
       return respond(res, 200, publicReport(report));
     } catch (error) {
-      console.error(JSON.stringify({ event: "sheets_migration_apply_failed", errorCode: error?.code || "UNKNOWN" }));
+      console.error(JSON.stringify({ event: "sheets_migration_apply_failed", ...safeMigrationError(error) }));
       if (claimAcquired) {
         try { await releaseClaim(spreadsheetId, token); }
         catch { console.error(JSON.stringify({ event: "sheets_migration_claim_release_failed", errorCode: "UNKNOWN" })); }

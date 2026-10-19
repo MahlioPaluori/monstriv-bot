@@ -27,7 +27,7 @@ function makeSheet(title, sheetId, rows) {
   };
 }
 
-function migrationMock({ individualCategory = false, militaryCategory = false, unknown = false, withReference = false, failCopy = false } = {}) {
+function migrationMock({ individualCategory = false, militaryCategory = false, unknown = false, withReference = false, wrongCategoryValidation = false, failCopy = false, failValidation = false } = {}) {
   const state = {
     files: [{ id: "monthly-1", name: "Запити-жовтень-2026", mimeType: "application/vnd.google-apps.spreadsheet", parents: ["root"] }],
     sheets: [
@@ -49,8 +49,16 @@ function migrationMock({ individualCategory = false, militaryCategory = false, u
     copies: [],
     mutations: [],
     events: [],
+    namedRanges: [],
+    insertRequests: [],
   };
   if (withReference) state.sheets.push(makeSheet("Довідники", 13, [["Категорія запиту"], ["Власна категорія"], ["Такмед"]]));
+  if (wrongCategoryValidation) {
+    const statusRule = { condition: { type: "ONE_OF_LIST", values: [{ userEnteredValue: "Нова" }, { userEnteredValue: "В роботі" }] }, strict: true, showCustomUi: true };
+    for (const sheet of state.sheets.filter((item) => item.properties.title !== "Довідники")) {
+      sheet.data[0].rowData[1].values[1].dataValidation = structuredClone(statusRule);
+    }
+  }
 
   const ensureGridCell = (sheet, rowIndex, columnIndex) => {
     const rows = sheet.data[0].rowData;
@@ -74,7 +82,7 @@ function migrationMock({ individualCategory = false, militaryCategory = false, u
   };
   const sheetsApi = {
     spreadsheets: {
-      get: async ({ spreadsheetId, includeGridData }) => ({ data: { spreadsheetId, sheets: includeGridData === false
+      get: async ({ spreadsheetId, includeGridData }) => ({ data: { spreadsheetId, namedRanges: structuredClone(state.namedRanges), sheets: includeGridData === false
         ? state.sheets.map((sheet) => ({ properties: sheet.properties }))
         : structuredClone(state.sheets) } }),
       values: {
@@ -96,10 +104,16 @@ function migrationMock({ individualCategory = false, militaryCategory = false, u
       batchUpdate: async ({ requestBody }) => {
         for (const request of requestBody.requests || []) {
           if (request.insertDimension) {
+            state.insertRequests.push(structuredClone(request.insertDimension));
             state.mutations.push(`insert:${request.insertDimension.range.sheetId}`);
             state.events.push(`insert:${request.insertDimension.range.sheetId}`);
             const sheet = state.sheets.find((item) => item.properties.sheetId === request.insertDimension.range.sheetId);
             for (const dataRow of sheet.data[0].rowData) dataRow.values.splice(1, 0, cell(""));
+          }
+          if (request.addNamedRange) {
+            state.mutations.push("named-range");
+            state.events.push("named-range");
+            state.namedRanges.push({ namedRangeId: "category-range", ...structuredClone(request.addNamedRange.namedRange) });
           }
           if (request.addSheet) {
             state.mutations.push("add:Довідники");
@@ -108,10 +122,16 @@ function migrationMock({ individualCategory = false, militaryCategory = false, u
             state.sheets.push(added);
           }
           if (request.setDataValidation) {
-            state.mutations.push(`validation:${request.setDataValidation.range.sheetId}`);
-            state.events.push(`validation:${request.setDataValidation.range.sheetId}`);
+            if (failValidation && request.setDataValidation.rule) {
+              throw Object.assign(new Error("Invalid condition"), { response: { status: 400, data: { error: { message: "Invalid ONE_OF_RANGE" } } } });
+            }
+            const action = request.setDataValidation.rule ? "validation" : "clear-validation";
+            state.mutations.push(`${action}:${request.setDataValidation.range.sheetId}`);
+            state.events.push(`${action}:${request.setDataValidation.range.sheetId}`);
             const sheet = state.sheets.find((item) => item.properties.sheetId === request.setDataValidation.range.sheetId);
-            ensureGridCell(sheet, 1, 1).dataValidation = request.setDataValidation.rule;
+            const target = ensureGridCell(sheet, 1, 1);
+            if (request.setDataValidation.rule) target.dataValidation = structuredClone(request.setDataValidation.rule);
+            else delete target.dataValidation;
           }
         }
         return { data: { replies: [] } };
@@ -145,9 +165,12 @@ test("apply backs up, inserts B, preserves data and links, creates reference and
   const report = await runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services });
   assert.equal(report.results[0].result, "migrated");
   assert.deepEqual(state.copies, ["backup-1"]);
+  assert.ok(state.insertRequests.every((request) => request.inheritFromBefore === false));
   assert.equal(state.sheets[0].data[0].rowData[1].values[2].formattedValue, "2026-10-0001");
   assert.equal(state.sheets[0].data[0].rowData[1].values[7].textFormatRuns[0].format.link.uri, "https://drive.test/passport");
   assert.ok(state.sheets.some((sheet) => sheet.properties.title === "Довідники"));
+  assert.ok(state.mutations.includes("named-range"));
+  assert.ok(state.mutations.includes("clear-validation:11"));
   assert.ok(state.mutations.includes("validation:11"));
   assert.ok(state.mutations.includes("validation:12"));
 });
@@ -180,6 +203,26 @@ test("category columns without reference or validation resume safely without ins
   assert.ok(state.mutations.includes("validation:12"));
 });
 
+test("partially migrated category sheets replace inherited status validation without inserting B again", async () => {
+  const { state, services } = migrationMock({ individualCategory: true, militaryCategory: true, withReference: true, wrongCategoryValidation: true });
+  const report = await runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services });
+  assert.equal(report.results[0].result, "migrated");
+  assert.deepEqual(state.mutations.filter((item) => item.startsWith("insert:")), []);
+  assert.ok(state.mutations.includes("named-range"));
+  for (const sheetId of [11, 12]) {
+    const clearIndex = state.events.indexOf(`clear-validation:${sheetId}`);
+    const setIndex = state.events.indexOf(`validation:${sheetId}`);
+    assert.ok(clearIndex >= 0 && setIndex > clearIndex);
+    const sheet = state.sheets.find((item) => item.properties.sheetId === sheetId);
+    const condition = sheet.data[0].rowData[1].values[1].dataValidation.condition;
+    assert.equal(condition.type, "ONE_OF_RANGE");
+    assert.equal(condition.values[0].userEnteredValue, "MonstrivRequestCategories");
+  }
+  const second = await runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services });
+  assert.equal(second.results[0].result, "already_migrated");
+  assert.equal(state.copies.length, 1);
+});
+
 test("migration holds both production writer leases before backup and all mutations", async () => {
   const { state, services } = migrationMock();
   await runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services });
@@ -200,4 +243,12 @@ test("backup API failure stops apply before Sheets mutations", async () => {
   const { state, services } = migrationMock({ failCopy: true });
   await assert.rejects(runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services }), /copy failed/);
   assert.deepEqual(state.mutations, []);
+});
+
+test("Google validation failure is tagged with the safe migration stage", async () => {
+  const { services } = migrationMock({ failValidation: true });
+  await assert.rejects(
+    runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services }),
+    (error) => error.migrationStage === "set_category_validation" && error.response?.status === 400,
+  );
 });

@@ -142,3 +142,38 @@ test("failed apply releases its owned claim and returns a generic error", async 
   assert.equal(released, true);
   assert.deepEqual(res.body, { error: "Migration apply failed" });
 });
+
+test("failed apply logs safe Google API stage, status and message without response data", async () => {
+  const entries = [];
+  const originalError = console.error;
+  console.error = (value) => entries.push(JSON.parse(value));
+  try {
+    const upstream = Object.assign(new Error("Invalid requests[0].setDataValidation"), {
+      code: 400,
+      migrationStage: "set_category_validation",
+      response: { status: 400, data: { error: { message: "Invalid condition: ONE_OF_RANGE" }, access_token: "must-not-log" } },
+    });
+    const handler = createGoogleSheetsMigrationHandler({
+      environment,
+      beginClaim: async () => "ACQUIRED",
+      releaseClaim: async () => true,
+      runMigration: async () => { throw upstream; },
+    });
+    const res = responseMock();
+    await handler({
+      method: "POST",
+      headers: { "x-sheets-migration-admin-secret": "admin-secret", "x-sheets-migration-apply-token": "apply-secret" },
+      body: { mode: "apply", confirmation: "APPLY_CATEGORY_MIGRATION", spreadsheetId: "spreadsheet_12345" },
+    }, res);
+    assert.equal(res.statusCode, 500);
+    assert.deepEqual(entries[0], {
+      event: "sheets_migration_apply_failed",
+      stage: "set_category_validation",
+      httpCode: 400,
+      googleMessage: "Invalid condition: ONE_OF_RANGE",
+    });
+    assert.doesNotMatch(JSON.stringify(entries), /must-not-log|admin-secret|apply-secret/);
+  } finally {
+    console.error = originalError;
+  }
+});

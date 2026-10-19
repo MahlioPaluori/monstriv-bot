@@ -155,7 +155,7 @@ test("new monthly spreadsheet contract includes expandable category reference an
   const validation = categoryValidationRequest(7).setDataValidation;
   assert.deepEqual(validation.range, { sheetId: 7, startRowIndex: 1, startColumnIndex: 1, endColumnIndex: 2 });
   assert.equal(validation.rule.condition.type, "ONE_OF_RANGE");
-  assert.equal(validation.rule.condition.values[0].userEnteredValue, "'Довідники'!$A$2:$A");
+  assert.equal(validation.rule.condition.values[0].userEnteredValue, "MonstrivRequestCategories");
 });
 
 test("category layout leaves operator category blank and keeps it on retry", async () => {
