@@ -27,7 +27,7 @@ function makeSheet(title, sheetId, rows) {
   };
 }
 
-function migrationMock({ individualCategory = false, militaryCategory = false, unknown = false, withReference = false, wrongCategoryValidation = false, failCopy = false, failValidation = false, ignoreValidationWrite = false } = {}) {
+function migrationMock({ individualCategory = false, militaryCategory = false, unknown = false, withReference = false, wrongCategoryValidation = false, failCopy = false, failValidation = false, ignoreValidationWrite = false, materializeNamedRangeEnd = false } = {}) {
   const state = {
     files: [{ id: "monthly-1", name: "Запити-жовтень-2026", mimeType: "application/vnd.google-apps.spreadsheet", parents: ["root"] }],
     sheets: [
@@ -113,7 +113,12 @@ function migrationMock({ individualCategory = false, militaryCategory = false, u
           if (request.addNamedRange) {
             state.mutations.push("named-range");
             state.events.push("named-range");
-            state.namedRanges.push({ namedRangeId: "category-range", ...structuredClone(request.addNamedRange.namedRange) });
+            const created = { namedRangeId: "category-range", ...structuredClone(request.addNamedRange.namedRange) };
+            if (materializeNamedRangeEnd) {
+              const reference = state.sheets.find((item) => item.properties.sheetId === created.range.sheetId);
+              created.range.endRowIndex = reference.properties.gridProperties.rowCount;
+            }
+            state.namedRanges.push(created);
           }
           if (request.addSheet) {
             state.mutations.push("add:Довідники");
@@ -221,6 +226,21 @@ test("partially migrated category sheets replace inherited status validation wit
   const second = await runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services });
   assert.equal(second.results[0].result, "already_migrated");
   assert.equal(state.copies.length, 1);
+});
+
+test("API-materialized full-column named range is accepted after creation", async () => {
+  const { state, services } = migrationMock({
+    individualCategory: true,
+    militaryCategory: true,
+    withReference: true,
+    wrongCategoryValidation: true,
+    materializeNamedRangeEnd: true,
+  });
+  const report = await runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services });
+  assert.equal(report.results[0].result, "migrated");
+  assert.equal(report.results[0].namedRange.valid, true);
+  assert.equal(state.namedRanges[0].range.endRowIndex, 100);
+  assert.deepEqual(state.mutations.filter((item) => item.startsWith("insert:")), []);
 });
 
 test("migration holds both production writer leases before backup and all mutations", async () => {

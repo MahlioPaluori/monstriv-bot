@@ -6,6 +6,7 @@ import {
   categoryValidationRequest,
   findApplicationRowsInSpreadsheet,
   INITIAL_REQUEST_CATEGORIES,
+  isExpectedCategoryNamedRange,
   newMonthlySpreadsheetSheets,
   resolveOperatorSheetLayout,
   runWithSheetWriteLease,
@@ -161,6 +162,13 @@ test("new monthly spreadsheet contract includes expandable category reference an
   assert.equal(namedRange.name, "MonstrivRequestCategories");
   assert.equal(namedRange.namedRangeId, undefined);
   assert.deepEqual(namedRange.range, { sheetId: 9, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 1 });
+  const apiNamedRange = { name: "MonstrivRequestCategories", range: { sheetId: 9, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 1 } };
+  assert.equal(isExpectedCategoryNamedRange(apiNamedRange, 9, 1000), true);
+  assert.equal(isExpectedCategoryNamedRange({ ...apiNamedRange, range: { ...apiNamedRange.range, endRowIndex: null } }, 9, 1000), true);
+  assert.equal(isExpectedCategoryNamedRange({ ...apiNamedRange, range: { ...apiNamedRange.range, endRowIndex: 1000 } }, 9, 1000), true);
+  assert.equal(isExpectedCategoryNamedRange({ ...apiNamedRange, range: { ...apiNamedRange.range, endRowIndex: 999 } }, 9, 1000), false);
+  assert.equal(isExpectedCategoryNamedRange({ ...apiNamedRange, range: { ...apiNamedRange.range, endRowIndex: 0 } }, 9, 1000), false);
+  assert.equal(isExpectedCategoryNamedRange({ ...apiNamedRange, range: { ...apiNamedRange.range, sheetId: 10 } }, 9, 1000), false);
 });
 
 test("category layout leaves operator category blank and keeps it on retry", async () => {
