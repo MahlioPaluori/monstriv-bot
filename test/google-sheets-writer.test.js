@@ -2,10 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  categoryValidationRequest,
+  findApplicationRowsInSpreadsheet,
+  INITIAL_REQUEST_CATEGORIES,
+  newMonthlySpreadsheetSheets,
+  resolveOperatorSheetLayout,
   runWithSheetWriteLease,
   writeConfirmedMultiRequest,
   writeConfirmedSingleRequest,
 } from "../lib/google-sheets.js";
+
+const LEGACY_HEADERS = ["Статус", "ID запиту", "Дата", "Потреба", "ПІБ", "Телефон", "Паспорт", "РНОКПП", "Військовий документ", "УБД", "Місто", "Нова пошта", "Інший отримувач", "ПІБ отримувача", "Телефон отримувача"];
+const CATEGORY_HEADERS = ["Статус", "Категорія запиту", ...LEGACY_HEADERS.slice(1)];
+const singleRow = (id, headers = LEGACY_HEADERS) => {
+  const row = Array(headers.length).fill("");
+  row[0] = "Нова";
+  row[headers === CATEGORY_HEADERS ? 2 : 1] = id;
+  return row;
+};
 
 process.env.VERCEL_PROJECT_PRODUCTION_URL ||= "example.test";
 process.env.REQUEST_CARD_SIGNING_SECRET ||= "test-secret";
@@ -35,7 +49,7 @@ function trimValues(values) {
   return rows;
 }
 
-function sheetsMock({ rows = [["Статус", "ID"]], rowGroups = [], failCollapseOnce = false } = {}) {
+function sheetsMock({ rows = [LEGACY_HEADERS], rowGroups = [], failCollapseOnce = false } = {}) {
   const state = {
     rows: rows.map((row) => [...row]),
     rowGroups: rowGroups.map((group) => structuredClone(group)),
@@ -129,13 +143,77 @@ function multiRequest(count = 2) {
 const ownership = async () => {};
 const confirmedAt = "2026-10-14T08:00:00.000Z";
 
+test("layout resolver accepts exact legacy and category headers and rejects ambiguous headers", () => {
+  assert.equal(resolveOperatorSheetLayout("Фізособи", LEGACY_HEADERS).applicationIdIndex, 1);
+  assert.equal(resolveOperatorSheetLayout("Фізособи", CATEGORY_HEADERS).applicationIdIndex, 2);
+  assert.throws(() => resolveOperatorSheetLayout("Фізособи", ["Статус", "ID запиту"]), (error) => error.code === "SHEETS_UNKNOWN_LAYOUT");
+});
+
+test("new monthly spreadsheet contract includes expandable category reference and validation", () => {
+  assert.deepEqual(newMonthlySpreadsheetSheets().map((sheet) => sheet.properties.title), ["Фізособи", "Військові частини", "Довідники"]);
+  assert.deepEqual(INITIAL_REQUEST_CATEGORIES, ["Старлінк", "Старлінк міні", "Детектор", "Зарядна станція/Генератор", "Такмед", "Інше"]);
+  const validation = categoryValidationRequest(7).setDataValidation;
+  assert.deepEqual(validation.range, { sheetId: 7, startRowIndex: 1, startColumnIndex: 1, endColumnIndex: 2 });
+  assert.equal(validation.rule.condition.type, "ONE_OF_RANGE");
+  assert.equal(validation.rule.condition.values[0].userEnteredValue, "'Довідники'!$A$2:$A");
+});
+
+test("category layout leaves operator category blank and keeps it on retry", async () => {
+  const { api, state } = sheetsMock({ rows: [CATEGORY_HEADERS] });
+  const request = multiRequest();
+  request.beneficiaries[0].documents.passport = [{ fileName: "passport.jpg", driveUrl: "https://example.test/file" }];
+  const args = { sheetsApi: api, spreadsheetId: "sheet", sheetId: 7, request, applicationId: "2026-10-0001", confirmedAt, assertOwnership: ownership };
+  await writeConfirmedMultiRequest(args);
+  assert.equal(state.rows[1][1], "");
+  assert.equal(state.rows[1][2], "2026-10-0001");
+  assert.equal(state.rows[2][7], "passport.jpg");
+  state.rows[1][1] = "Такмед";
+  await writeConfirmedMultiRequest(args);
+  assert.equal(state.rows[1][1], "Такмед");
+  assert.deepEqual(state.rows.slice(2, 4).map((row) => row[2]), ["Особа 1", "Особа 2"]);
+});
+
+test("category-layout single writer puts the ID in C and preserves operator category on retry", async () => {
+  const { api, state } = sheetsMock({ rows: [CATEGORY_HEADERS] });
+  const row = singleRow("2026-10-0010", CATEGORY_HEADERS);
+  const args = { sheetsApi: api, spreadsheetId: "sheet", sheetId: 7, sheetTitle: "Фізособи", row, documentCells: [], applicationId: "2026-10-0010", assertOwnership: ownership };
+  await writeConfirmedSingleRequest(args);
+  assert.equal(state.rows[1][1], "");
+  assert.equal(state.rows[1][2], "2026-10-0010");
+  state.rows[1][1] = "Детектор";
+  await writeConfirmedSingleRequest(args);
+  assert.equal(state.rows[1][1], "Детектор");
+});
+
+test("unknown headers fail before a writer update", async () => {
+  const { api, state } = sheetsMock({ rows: [["Статус", "Невідома колонка"]] });
+  await assert.rejects(writeConfirmedSingleRequest({ sheetsApi: api, spreadsheetId: "sheet", sheetId: 7, sheetTitle: "Фізособи", row: singleRow("2026-10-0001"), documentCells: [], applicationId: "2026-10-0001", assertOwnership: ownership }), (error) => error.code === "SHEETS_UNKNOWN_LAYOUT");
+  assert.equal(state.rows.length, 1);
+});
+
+test("application ID lookup uses each sheet layout's semantic ID column", async () => {
+  const individualRows = [CATEGORY_HEADERS, singleRow("2026-10-0007", CATEGORY_HEADERS)];
+  const militaryHeaders = ["Статус", "ID запиту", "Дата", "Потреба", "ПІБ відповідальної особи", "Телефон", "Номер ВЧ", "Офіційний запит", "Місто", "Нова пошта", "Інший отримувач", "ПІБ отримувача", "Телефон отримувача"];
+  const militaryRows = [militaryHeaders, ["Нова", "2026-10-0008"]];
+  const api = { spreadsheets: { values: { get: async ({ range }) => {
+    const rows = range.includes("'Фізособи'") ? individualRows : militaryRows;
+    if (range.endsWith("A1:Z1")) return { data: { values: [rows[0]] } };
+    const idIndex = range.includes("'Фізособи'") ? 2 : 1;
+    return { data: { values: rows.slice(1).map((row) => [row[idIndex]]) } };
+  } } } };
+  const individual = await findApplicationRowsInSpreadsheet(api, "sheet", "2026-10-0007");
+  const military = await findApplicationRowsInSpreadsheet(api, "sheet", "2026-10-0008");
+  assert.deepEqual(individual.map(({ title, rowNumber }) => [title, rowNumber]), [["Фізособи", 2]]);
+  assert.deepEqual(military.map(({ title, rowNumber }) => [title, rowNumber]), [["Військові частини", 2]]);
+});
+
 test("multi followed by single keeps the single row outside the multi group", async () => {
   const previousSecret = process.env.REQUEST_CARD_SIGNING_SECRET;
   process.env.REQUEST_CARD_SIGNING_SECRET = "test-secret";
   try {
     const { api, state } = sheetsMock();
     await writeConfirmedMultiRequest({ sheetsApi: api, spreadsheetId: "sheet", sheetId: 7, request: multiRequest(), applicationId: "2026-10-0001", confirmedAt, assertOwnership: ownership });
-    await writeConfirmedSingleRequest({ sheetsApi: api, spreadsheetId: "sheet", sheetId: 7, sheetTitle: "Фізособи", lastColumn: "O", row: ["Нова", "2026-10-0002"], documentCells: [], applicationId: "2026-10-0002", assertOwnership: ownership });
+    await writeConfirmedSingleRequest({ sheetsApi: api, spreadsheetId: "sheet", sheetId: 7, sheetTitle: "Фізособи", row: singleRow("2026-10-0002"), documentCells: [], applicationId: "2026-10-0002", assertOwnership: ownership });
     assert.equal(state.rows[4][1], "2026-10-0002");
     assert.deepEqual(state.rowGroups.map(({ range }) => [range.startIndex, range.endIndex]), [[2, 4]]);
     assert.equal(state.appendCalls, 0);
@@ -162,7 +240,7 @@ test("multi followed by multi creates isolated non-overlapping groups", async ()
 
 test("single followed by multi preserves the single row and creates one exact detail group", async () => {
   const { api, state } = sheetsMock();
-  await writeConfirmedSingleRequest({ sheetsApi: api, spreadsheetId: "sheet", sheetId: 7, sheetTitle: "Фізособи", lastColumn: "O", row: ["Нова", "2026-10-0001"], documentCells: [], applicationId: "2026-10-0001", assertOwnership: ownership });
+  await writeConfirmedSingleRequest({ sheetsApi: api, spreadsheetId: "sheet", sheetId: 7, sheetTitle: "Фізособи", row: singleRow("2026-10-0001"), documentCells: [], applicationId: "2026-10-0001", assertOwnership: ownership });
   await writeConfirmedMultiRequest({ sheetsApi: api, spreadsheetId: "sheet", sheetId: 7, request: multiRequest(), applicationId: "2026-10-0002", confirmedAt, assertOwnership: ownership });
   assert.deepEqual(state.rows.slice(1, 5).map((row) => row[1]), ["2026-10-0001", "2026-10-0002", "Особа 1", "Особа 2"]);
   assert.deepEqual(state.rowGroups.map(({ range }) => [range.startIndex, range.endIndex]), [[3, 5]]);
@@ -182,7 +260,7 @@ test("partial multi retry writes only a verified empty suffix without duplicates
   const previousSecret = process.env.REQUEST_CARD_SIGNING_SECRET;
   process.env.REQUEST_CARD_SIGNING_SECRET = "test-secret";
   try {
-    const { api, state } = sheetsMock({ rows: [["Статус", "ID"], ["Нова", "2026-10-0001"], ["", "Особа 1"]] });
+    const { api, state } = sheetsMock({ rows: [LEGACY_HEADERS, singleRow("2026-10-0001"), ["", "Особа 1"]] });
     await writeConfirmedMultiRequest({ sheetsApi: api, spreadsheetId: "sheet", sheetId: 7, request: multiRequest(), applicationId: "2026-10-0001", confirmedAt, assertOwnership: ownership });
     assert.deepEqual(state.rows.slice(1, 4).map((row) => row[1]), ["2026-10-0001", "Особа 1", "Особа 2"]);
     assert.equal(state.rows.filter((row) => row[1] === "Особа 2").length, 1);
@@ -193,7 +271,7 @@ test("partial multi retry writes only a verified empty suffix without duplicates
 });
 
 test("partial multi retry refuses to overwrite a neighboring master", async () => {
-  const { api, state } = sheetsMock({ rows: [["Статус", "ID"], ["Нова", "2026-10-0001"], ["", "Особа 1"], ["Нова", "2026-10-0099"]] });
+  const { api, state } = sheetsMock({ rows: [LEGACY_HEADERS, singleRow("2026-10-0001"), ["", "Особа 1"], singleRow("2026-10-0099")] });
   await assert.rejects(writeConfirmedMultiRequest({ sheetsApi: api, spreadsheetId: "sheet", sheetId: 7, request: multiRequest(), applicationId: "2026-10-0001", confirmedAt, assertOwnership: ownership }), /Cannot recover non-empty detail row/);
   assert.equal(state.rows[3][1], "2026-10-0099");
 });

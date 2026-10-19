@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { requestCardPage } from "../api/request-card.js";
-import { normalizeRequestRow } from "../lib/google-sheets.js";
+import { normalizeRequestRow, resolveOperatorSheetLayout } from "../lib/google-sheets.js";
 
 function baseRequest(overrides = {}) {
   return {
@@ -145,4 +145,29 @@ test("Sheets master rows expose document presence to single and military cards",
   assert.equal(single.documents.passport.length, 2);
   assert.equal(single.documents.ubd.length, 0);
   assert.equal(military.documents.official_request.length, 1);
+});
+
+test("category-layout Sheets rows normalize request cards with shifted document columns", () => {
+  const headers = ["Статус", "Категорія запиту", "ID запиту", "Дата", "Потреба", "ПІБ", "Телефон", "Паспорт", "РНОКПП", "Військовий документ", "УБД", "Місто", "Нова пошта", "Інший отримувач", "ПІБ отримувача", "Телефон отримувача"];
+  const layout = resolveOperatorSheetLayout("Фізособи", headers);
+  const request = normalizeRequestRow("individual", [
+    "Нова", "Такмед", "2026-10-0003", "14.10.2026", "Need", "Person", "000000000000",
+    "passport.jpg", "rnokpp.jpg", "military.pdf", "", "City", "1", "Ні", "", "",
+  ], layout);
+  assert.equal(request.applicationId, "2026-10-0003");
+  assert.equal(request.need, "Need");
+  assert.equal(request.documents.passport.length, 1);
+  assert.equal(request.actualRecipientName, "Person");
+});
+
+test("category-layout military rows keep unit and official-request semantics", () => {
+  const headers = ["Статус", "Категорія запиту", "ID запиту", "Дата", "Потреба", "ПІБ відповідальної особи", "Телефон", "Номер ВЧ", "Офіційний запит", "Місто", "Нова пошта", "Інший отримувач", "ПІБ отримувача", "Телефон отримувача"];
+  const layout = resolveOperatorSheetLayout("Військові частини", headers);
+  const request = normalizeRequestRow("military_unit", [
+    "Нова", "Старлінк", "2026-10-0004", "14.10.2026", "Need", "Contact", "000000000000",
+    "A1234", "official.pdf", "City", "1", "Ні", "", "",
+  ], layout);
+  assert.equal(request.applicationId, "2026-10-0004");
+  assert.equal(request.militaryUnitNumber, "A1234");
+  assert.equal(request.documents.official_request.length, 1);
 });
