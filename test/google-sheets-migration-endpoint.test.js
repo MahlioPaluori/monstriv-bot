@@ -151,7 +151,7 @@ test("failed apply logs safe Google API stage, status and message without respon
     const upstream = Object.assign(new Error("Invalid requests[0].setDataValidation"), {
       code: 400,
       migrationStage: "set_category_validation",
-      response: { status: 400, data: { error: { message: "Invalid condition: ONE_OF_RANGE" }, access_token: "must-not-log" } },
+      response: { status: 400, data: { error: { message: "Invalid condition: ONE_OF_RANGE; Bearer oauth-token-must-not-log" }, access_token: "must-not-log" } },
     });
     const handler = createGoogleSheetsMigrationHandler({
       environment,
@@ -169,11 +169,59 @@ test("failed apply logs safe Google API stage, status and message without respon
     assert.deepEqual(entries[0], {
       event: "sheets_migration_apply_failed",
       stage: "set_category_validation",
+      exceptionType: "Error",
+      errorCode: "GOOGLE_API_ERROR",
       httpCode: 400,
-      googleMessage: "Invalid condition: ONE_OF_RANGE",
+      googleMessage: "Invalid condition: ONE_OF_RANGE; Bearer [REDACTED]",
+      safeMessage: null,
+      stackLocation: null,
     });
-    assert.doesNotMatch(JSON.stringify(entries), /must-not-log|admin-secret|apply-secret/);
+    assert.doesNotMatch(JSON.stringify(entries), /oauth-token-must-not-log|must-not-log|admin-secret|apply-secret/);
   } finally {
     console.error = originalError;
+  }
+});
+
+test("local and Redis failures retain a stage and controlled diagnostics", async () => {
+  const cases = [
+    {
+      expectedStage: "migration_claim_begin",
+      options: { beginClaim: async () => { throw Object.assign(new Error("redis connection details"), { code: "ECONNRESET" }); } },
+      expectedCode: "ECONNRESET",
+    },
+    {
+      expectedStage: "migration_execute",
+      options: { beginClaim: async () => "ACQUIRED", releaseClaim: async () => true, runMigration: async () => { throw new TypeError("private internal value"); } },
+      expectedCode: "INTERNAL_ERROR",
+      expectedType: "TypeError",
+    },
+    {
+      expectedStage: "migration_claim_complete",
+      options: { beginClaim: async () => "ACQUIRED", runMigration: async () => safeReport("apply"), completeClaim: async () => false, releaseClaim: async () => true },
+      expectedCode: "MIGRATION_CLAIM_LOST",
+      expectedSafeMessage: "Migration completion claim lost",
+    },
+  ];
+  for (const scenario of cases) {
+    const entries = [];
+    const originalError = console.error;
+    console.error = (value) => entries.push(JSON.parse(value));
+    try {
+      const handler = createGoogleSheetsMigrationHandler({ environment, ...scenario.options });
+      const res = responseMock();
+      await handler({
+        method: "POST",
+        headers: { "x-sheets-migration-admin-secret": "admin-secret", "x-sheets-migration-apply-token": "apply-secret" },
+        body: { mode: "apply", confirmation: "APPLY_CATEGORY_MIGRATION", spreadsheetId: "spreadsheet_12345" },
+      }, res);
+      const entry = entries.find((item) => item.event === "sheets_migration_apply_failed");
+      assert.equal(entry.stage, scenario.expectedStage);
+      assert.equal(entry.errorCode, scenario.expectedCode);
+      assert.equal(entry.exceptionType, scenario.expectedType || "Error");
+      assert.equal(entry.safeMessage, scenario.expectedSafeMessage || null);
+      assert.doesNotMatch(JSON.stringify(entry), /redis connection details|private internal value/);
+    } finally {
+      console.error = originalError;
+    }
   }
 });

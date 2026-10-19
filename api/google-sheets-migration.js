@@ -31,17 +31,63 @@ function validSpreadsheetId(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{10,200}$/.test(value);
 }
 
+function attachStage(error, stage) {
+  if (error && typeof error === "object" && !error.migrationStage) error.migrationStage = stage;
+  throw error;
+}
+
+async function endpointStage(stage, operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    attachStage(error, stage);
+  }
+}
+
+function safeCode(value, fallback) {
+  if (typeof value !== "string") return fallback;
+  if (/^(?:MIGRATION|SHEET_WRITE)_[A-Z0-9_]{1,70}$/.test(value)) return value;
+  if (new Set(["ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT"]).has(value)) return value;
+  return fallback;
+}
+
+function safeStackLocation(error) {
+  if (typeof error?.stack !== "string") return null;
+  const match = error.stack.split("\n").slice(1).join("\n").match(/(?:file:\/\/\/)?[^\s()]*[\\/]((?:api|lib)[\\/][A-Za-z0-9._\\/-]+:\d+:\d+)/);
+  return match ? match[1].replace(/\\/g, "/") : null;
+}
+
+function safeExceptionType(value) {
+  return new Set(["Error", "TypeError", "ReferenceError", "RangeError", "SyntaxError"]).has(value) ? value : "Error";
+}
+
+function sanitizeGoogleMessage(value) {
+  return value
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+    .replace(/\b(access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|authorization)\b\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]")
+    .replace(/\bya29\.[A-Za-z0-9._-]+/g, "[REDACTED]")
+    .replace(/\b[A-Za-z0-9_-]{100,}\b/g, "[REDACTED]")
+    .trim()
+    .slice(0, 500);
+}
+
 function safeMigrationError(error) {
   const rawStatus = error?.response?.status ?? error?.code;
   const httpCode = Number.isInteger(Number(rawStatus)) ? Number(rawStatus) : null;
   const rawMessage = error?.response?.data?.error?.message;
   const googleMessage = typeof rawMessage === "string"
-    ? rawMessage.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 500)
-    : "No Google API message";
+    ? sanitizeGoogleMessage(rawMessage)
+    : null;
   return {
     stage: typeof error?.migrationStage === "string" ? error.migrationStage : "unknown",
+    exceptionType: safeExceptionType(error?.name),
+    errorCode: safeCode(error?.code, googleMessage ? "GOOGLE_API_ERROR" : "INTERNAL_ERROR"),
     httpCode,
     googleMessage,
+    safeMessage: error?.migrationSafeToLog === true && typeof error.message === "string" ? error.message.slice(0, 500) : null,
+    stackLocation: safeStackLocation(error),
   };
 }
 
@@ -93,7 +139,8 @@ export function createGoogleSheetsMigrationHandler({
         const report = await runMigration({ mode: "dry-run", spreadsheetId });
         return respond(res, 200, publicReport(report));
       } catch (error) {
-        console.error(JSON.stringify({ event: "sheets_migration_dry_run_failed", errorCode: error?.code || "UNKNOWN" }));
+        if (error && typeof error === "object" && !error.migrationStage) error.migrationStage = "dry_run_execute";
+        console.error(JSON.stringify({ event: "sheets_migration_dry_run_failed", ...safeMigrationError(error) }));
         return respond(res, 500, { error: "Dry-run failed" });
       }
     }
@@ -119,19 +166,25 @@ export function createGoogleSheetsMigrationHandler({
     const token = ownerToken();
     let claimAcquired = false;
     try {
-      const claim = await beginClaim(spreadsheetId, token);
+      const claim = await endpointStage("migration_claim_begin", () => beginClaim(spreadsheetId, token));
       if (claim === "COMPLETED") return respond(res, 409, { error: "Migration was already completed for this spreadsheet" });
       if (claim !== "ACQUIRED") return respond(res, 409, { error: "Migration is already running for this spreadsheet" });
       claimAcquired = true;
-      const report = await runMigration({ mode: "apply", spreadsheetId });
-      if (!await completeClaim(spreadsheetId, token)) throw Object.assign(new Error("Migration completion claim lost"), { code: "MIGRATION_CLAIM_LOST" });
+      const report = await endpointStage("migration_execute", () => runMigration({ mode: "apply", spreadsheetId }));
+      if (!await endpointStage("migration_claim_complete", () => completeClaim(spreadsheetId, token))) {
+        throw Object.assign(new Error("Migration completion claim lost"), {
+          code: "MIGRATION_CLAIM_LOST",
+          migrationStage: "migration_claim_complete",
+          migrationSafeToLog: true,
+        });
+      }
       claimAcquired = false;
       return respond(res, 200, publicReport(report));
     } catch (error) {
       console.error(JSON.stringify({ event: "sheets_migration_apply_failed", ...safeMigrationError(error) }));
       if (claimAcquired) {
-        try { await releaseClaim(spreadsheetId, token); }
-        catch { console.error(JSON.stringify({ event: "sheets_migration_claim_release_failed", errorCode: "UNKNOWN" })); }
+        try { await endpointStage("migration_claim_release", () => releaseClaim(spreadsheetId, token)); }
+        catch (releaseError) { console.error(JSON.stringify({ event: "sheets_migration_claim_release_failed", ...safeMigrationError(releaseError) })); }
       }
       return respond(res, error?.code === "SHEET_WRITE_BUSY" ? 409 : 500, { error: "Migration apply failed" });
     }

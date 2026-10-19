@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  categoryNamedRangeRequest,
   categoryValidationRequest,
   findApplicationRowsInSpreadsheet,
   INITIAL_REQUEST_CATEGORIES,
@@ -156,6 +157,10 @@ test("new monthly spreadsheet contract includes expandable category reference an
   assert.deepEqual(validation.range, { sheetId: 7, startRowIndex: 1, startColumnIndex: 1, endColumnIndex: 2 });
   assert.equal(validation.rule.condition.type, "ONE_OF_RANGE");
   assert.equal(validation.rule.condition.values[0].userEnteredValue, "MonstrivRequestCategories");
+  const namedRange = categoryNamedRangeRequest(9).addNamedRange.namedRange;
+  assert.equal(namedRange.name, "MonstrivRequestCategories");
+  assert.equal(namedRange.namedRangeId, undefined);
+  assert.deepEqual(namedRange.range, { sheetId: 9, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 1 });
 });
 
 test("category layout leaves operator category blank and keeps it on retry", async () => {

@@ -27,7 +27,7 @@ function makeSheet(title, sheetId, rows) {
   };
 }
 
-function migrationMock({ individualCategory = false, militaryCategory = false, unknown = false, withReference = false, wrongCategoryValidation = false, failCopy = false, failValidation = false } = {}) {
+function migrationMock({ individualCategory = false, militaryCategory = false, unknown = false, withReference = false, wrongCategoryValidation = false, failCopy = false, failValidation = false, ignoreValidationWrite = false } = {}) {
   const state = {
     files: [{ id: "monthly-1", name: "Запити-жовтень-2026", mimeType: "application/vnd.google-apps.spreadsheet", parents: ["root"] }],
     sheets: [
@@ -130,7 +130,7 @@ function migrationMock({ individualCategory = false, militaryCategory = false, u
             state.events.push(`${action}:${request.setDataValidation.range.sheetId}`);
             const sheet = state.sheets.find((item) => item.properties.sheetId === request.setDataValidation.range.sheetId);
             const target = ensureGridCell(sheet, 1, 1);
-            if (request.setDataValidation.rule) target.dataValidation = structuredClone(request.setDataValidation.rule);
+            if (request.setDataValidation.rule && !ignoreValidationWrite) target.dataValidation = structuredClone(request.setDataValidation.rule);
             else delete target.dataValidation;
           }
         }
@@ -250,5 +250,15 @@ test("Google validation failure is tagged with the safe migration stage", async 
   await assert.rejects(
     runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services }),
     (error) => error.migrationStage === "set_category_validation" && error.response?.status === 400,
+  );
+});
+
+test("post-verification failure exposes a controlled local stage and code", async () => {
+  const { services } = migrationMock({ ignoreValidationWrite: true });
+  await assert.rejects(
+    runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services }),
+    (error) => error.migrationStage === "verify_category_validation"
+      && error.code === "MIGRATION_VALIDATION_VERIFICATION_FAILED"
+      && error.migrationSafeToLog === true,
   );
 });
