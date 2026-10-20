@@ -221,11 +221,31 @@ test("partially migrated category sheets replace inherited status validation wit
     const sheet = state.sheets.find((item) => item.properties.sheetId === sheetId);
     const condition = sheet.data[0].rowData[1].values[1].dataValidation.condition;
     assert.equal(condition.type, "ONE_OF_RANGE");
-    assert.equal(condition.values[0].userEnteredValue, "MonstrivRequestCategories");
+    assert.equal(condition.values[0].userEnteredValue, "'Довідники'!A2:A");
   }
   const second = await runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services });
   assert.equal(second.results[0].result, "already_migrated");
   assert.equal(state.copies.length, 1);
+});
+
+test("dry-run rejects ONE_OF_RANGE validation that uses the named range identifier instead of A1 notation", async () => {
+  const { state, services } = migrationMock({ individualCategory: true, militaryCategory: true, withReference: true });
+  const invalidRule = {
+    condition: { type: "ONE_OF_RANGE", values: [{ userEnteredValue: "MonstrivRequestCategories" }] },
+    strict: true,
+    showCustomUi: true,
+  };
+  for (const sheet of state.sheets.filter((item) => item.properties.sheetId === 11 || item.properties.sheetId === 12)) {
+    sheet.data[0].rowData[1].values[1].dataValidation = structuredClone(invalidRule);
+  }
+
+  const report = await runCategoryMigration({ mode: "dry-run", spreadsheetId: "monthly-1", services });
+  for (const sheet of report.results[0].sheets) {
+    assert.equal(sheet.stats.validationPresent, false);
+    assert.equal(sheet.stats.validationType, "ONE_OF_RANGE");
+    assert.equal(sheet.stats.validationSource, "MonstrivRequestCategories");
+  }
+  assert.equal(report.results[0].result, "would_migrate");
 });
 
 test("API-materialized full-column named range is accepted after creation", async () => {

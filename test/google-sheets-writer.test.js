@@ -157,7 +157,7 @@ test("new monthly spreadsheet contract includes expandable category reference an
   const validation = categoryValidationRequest(7).setDataValidation;
   assert.deepEqual(validation.range, { sheetId: 7, startRowIndex: 1, startColumnIndex: 1, endColumnIndex: 2 });
   assert.equal(validation.rule.condition.type, "ONE_OF_RANGE");
-  assert.equal(validation.rule.condition.values[0].userEnteredValue, "MonstrivRequestCategories");
+  assert.equal(validation.rule.condition.values[0].userEnteredValue, "'Довідники'!A2:A");
   const namedRange = categoryNamedRangeRequest(9).addNamedRange.namedRange;
   assert.equal(namedRange.name, "MonstrivRequestCategories");
   assert.equal(namedRange.namedRangeId, undefined);
