@@ -28,7 +28,7 @@ function safeReport(mode = "dry-run") {
       name: "Запити-жовтень-2026",
       result: mode === "apply" ? "migrated" : "would_migrate",
       sheets: [{ title: "Фізособи", layout: "legacy", stats: { masterRows: 1 } }],
-      reference: { present: false, valid: false, categories: [] },
+      reference: { present: false, valid: false, categoryState: "missing", categories: [] },
       namedRange: { present: true, valid: false, count: 1, referenceSheetId: 13, referenceRowCount: 1000, targets: [{ sheetId: 13, startRowIndex: 1, endRowIndex: 999, startColumnIndex: 0, endColumnIndex: 1 }] },
       ambiguities: [],
       backup: mode === "apply" ? { id: "backup_12345", name: "backup" } : null,
@@ -56,6 +56,7 @@ test("authorized GET can only run dry-run and returns a sanitized report", async
   assert.equal(res.statusCode, 200);
   assert.deepEqual(options, { mode: "dry-run", spreadsheetId: "spreadsheet_12345" });
   assert.equal(res.body.results[0].reference.categoryCount, 0);
+  assert.equal(res.body.results[0].reference.categoryState, "missing");
   assert.equal("categories" in res.body.results[0].reference, false);
   assert.equal(res.body.results[0].namedRange.targets[0].endRowIndex, 999);
   assert.equal(res.headers.Pragma, "no-cache");

@@ -5,6 +5,8 @@ import { runCategoryMigration } from "../lib/google-sheets-migration.js";
 
 const INDIVIDUAL_LEGACY = ["Статус", "ID запиту", "Дата", "Потреба", "ПІБ", "Телефон", "Паспорт", "РНОКПП", "Військовий документ", "УБД", "Місто", "Нова пошта", "Інший отримувач", "ПІБ отримувача", "Телефон отримувача"];
 const MILITARY_LEGACY = ["Статус", "ID запиту", "Дата", "Потреба", "ПІБ відповідальної особи", "Телефон", "Номер ВЧ", "Офіційний запит", "Місто", "Нова пошта", "Інший отримувач", "ПІБ отримувача", "Телефон отримувача"];
+const LEGACY_CATEGORIES = ["Старлінк", "Старлінк міні", "Детектор", "Зарядна станція/Генератор", "Такмед", "Інше"];
+const CURRENT_CATEGORIES = ["Старлінк", "Старлінк міні", "Детектор", "Зарядні станції", "Генератори", "Такмед", "Інше"];
 
 function cell(value, options = {}) {
   const result = { formattedValue: value, userEnteredValue: options.formula ? { formulaValue: options.formula } : { stringValue: value } };
@@ -52,7 +54,7 @@ function migrationMock({ individualCategory = false, militaryCategory = false, u
     namedRanges: [],
     insertRequests: [],
   };
-  if (withReference) state.sheets.push(makeSheet("Довідники", 13, [["Категорія запиту"], ["Власна категорія"], ["Такмед"]]));
+  if (withReference) state.sheets.push(makeSheet("Довідники", 13, [["Категорія запиту"], ...LEGACY_CATEGORIES.map((category) => [category])]));
   if (wrongCategoryValidation) {
     const statusRule = { condition: { type: "ONE_OF_LIST", values: [{ userEnteredValue: "Нова" }, { userEnteredValue: "В роботі" }] }, strict: true, showCustomUi: true };
     for (const sheet of state.sheets.filter((item) => item.properties.title !== "Довідники")) {
@@ -128,7 +130,7 @@ function migrationMock({ individualCategory = false, militaryCategory = false, u
           }
           if (request.setDataValidation) {
             if (failValidation && request.setDataValidation.rule) {
-              throw Object.assign(new Error("Invalid condition"), { response: { status: 400, data: { error: { message: "Invalid ONE_OF_RANGE" } } } });
+              throw Object.assign(new Error("Invalid condition"), { response: { status: 400, data: { error: { message: "Invalid category validation" } } } });
             }
             const action = request.setDataValidation.rule ? "validation" : "clear-validation";
             state.mutations.push(`${action}:${request.setDataValidation.range.sheetId}`);
@@ -189,13 +191,13 @@ test("repeated apply is idempotent and does not create another backup or column"
   assert.equal(state.mutations.filter((item) => item.startsWith("insert:")).length, 2);
 });
 
-test("partially migrated spreadsheet migrates only the remaining legacy sheet and preserves custom categories", async () => {
+test("partially migrated spreadsheet migrates the remaining sheet and upgrades the exact legacy category list", async () => {
   const { state, services } = migrationMock({ individualCategory: true, withReference: true });
   const report = await runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services });
   assert.equal(report.results[0].result, "migrated");
   assert.deepEqual(state.mutations.filter((item) => item.startsWith("insert:")), ["insert:12"]);
   const reference = state.sheets.find((sheet) => sheet.properties.title === "Довідники");
-  assert.ok(reference.data[0].rowData.some((item) => item.values[0].formattedValue === "Власна категорія"));
+  assert.deepEqual(reference.data[0].rowData.slice(1).map((item) => item.values[0].formattedValue), CURRENT_CATEGORIES);
 });
 
 test("category columns without reference or validation resume safely without inserting another column", async () => {
@@ -203,6 +205,7 @@ test("category columns without reference or validation resume safely without ins
   const report = await runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services });
   assert.equal(report.results[0].result, "migrated");
   assert.deepEqual(state.mutations.filter((item) => item.startsWith("insert:")), []);
+  assert.equal(state.sheets.find((item) => item.properties.sheetId === 11).data[0].rowData[1].values[1].formattedValue, "Такмед");
   assert.ok(state.mutations.includes("add:Довідники"));
   assert.ok(state.mutations.includes("validation:11"));
   assert.ok(state.mutations.includes("validation:12"));
@@ -220,15 +223,15 @@ test("partially migrated category sheets replace inherited status validation wit
     assert.ok(clearIndex >= 0 && setIndex > clearIndex);
     const sheet = state.sheets.find((item) => item.properties.sheetId === sheetId);
     const condition = sheet.data[0].rowData[1].values[1].dataValidation.condition;
-    assert.equal(condition.type, "ONE_OF_RANGE");
-    assert.equal(condition.values[0].userEnteredValue, "'Довідники'!A2:A");
+    assert.equal(condition.type, "ONE_OF_LIST");
+    assert.deepEqual(condition.values.map((value) => value.userEnteredValue), CURRENT_CATEGORIES);
   }
   const second = await runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services });
   assert.equal(second.results[0].result, "already_migrated");
   assert.equal(state.copies.length, 1);
 });
 
-test("dry-run rejects ONE_OF_RANGE validation that uses the named range identifier instead of A1 notation", async () => {
+test("dry-run rejects legacy ONE_OF_RANGE validation after switching to the exact category list", async () => {
   const { state, services } = migrationMock({ individualCategory: true, militaryCategory: true, withReference: true });
   const invalidRule = {
     condition: { type: "ONE_OF_RANGE", values: [{ userEnteredValue: "MonstrivRequestCategories" }] },
@@ -246,6 +249,36 @@ test("dry-run rejects ONE_OF_RANGE validation that uses the named range identifi
     assert.equal(sheet.stats.validationSource, "MonstrivRequestCategories");
   }
   assert.equal(report.results[0].result, "would_migrate");
+});
+
+test("recovery upgrades the exact 6-category reference once and is idempotent", async () => {
+  const { state, services } = migrationMock({ individualCategory: true, militaryCategory: true, withReference: true, wrongCategoryValidation: true });
+  const first = await runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services });
+  assert.equal(first.results[0].result, "migrated");
+  const reference = state.sheets.find((sheet) => sheet.properties.sheetId === 13);
+  assert.deepEqual(reference.data[0].rowData.slice(1).map((item) => item.values[0].formattedValue), CURRENT_CATEGORIES);
+  assert.deepEqual(state.mutations.filter((item) => item.startsWith("insert:")), []);
+
+  const second = await runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services });
+  assert.equal(second.results[0].result, "already_migrated");
+  assert.equal(state.copies.length, 1);
+  assert.deepEqual(reference.data[0].rowData.slice(1).map((item) => item.values[0].formattedValue), CURRENT_CATEGORIES);
+});
+
+test("unknown manual reference changes block dry-run and apply before backup or mutation", async () => {
+  const { state, services } = migrationMock({ individualCategory: true, militaryCategory: true, withReference: true });
+  const reference = state.sheets.find((sheet) => sheet.properties.sheetId === 13);
+  reference.data[0].rowData[2].values[0] = cell("Ручна категорія");
+
+  const dryRun = await runCategoryMigration({ mode: "dry-run", spreadsheetId: "monthly-1", services });
+  assert.equal(dryRun.results[0].result, "blocked");
+  assert.ok(dryRun.results[0].ambiguities.some((message) => message.includes("unknown manual changes")));
+  await assert.rejects(
+    runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services }),
+    (error) => error.code === "MIGRATION_STRUCTURE_AMBIGUOUS",
+  );
+  assert.deepEqual(state.copies, []);
+  assert.deepEqual(state.mutations, []);
 });
 
 test("API-materialized full-column named range is accepted after creation", async () => {

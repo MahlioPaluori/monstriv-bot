@@ -103,6 +103,7 @@ function publicReport(report) {
       reference: {
         present: item.reference.present,
         valid: item.reference.valid,
+        categoryState: item.reference.categoryState,
         categoryCount: item.reference.categories.length,
       },
       namedRange: item.namedRange ? {

@@ -151,13 +151,13 @@ test("layout resolver accepts exact legacy and category headers and rejects ambi
   assert.throws(() => resolveOperatorSheetLayout("Фізособи", ["Статус", "ID запиту"]), (error) => error.code === "SHEETS_UNKNOWN_LAYOUT");
 });
 
-test("new monthly spreadsheet contract includes expandable category reference and validation", () => {
+test("new monthly spreadsheet contract includes the seven-category reference and exact list validation", () => {
   assert.deepEqual(newMonthlySpreadsheetSheets().map((sheet) => sheet.properties.title), ["Фізособи", "Військові частини", "Довідники"]);
-  assert.deepEqual(INITIAL_REQUEST_CATEGORIES, ["Старлінк", "Старлінк міні", "Детектор", "Зарядна станція/Генератор", "Такмед", "Інше"]);
+  assert.deepEqual(INITIAL_REQUEST_CATEGORIES, ["Старлінк", "Старлінк міні", "Детектор", "Зарядні станції", "Генератори", "Такмед", "Інше"]);
   const validation = categoryValidationRequest(7).setDataValidation;
   assert.deepEqual(validation.range, { sheetId: 7, startRowIndex: 1, startColumnIndex: 1, endColumnIndex: 2 });
-  assert.equal(validation.rule.condition.type, "ONE_OF_RANGE");
-  assert.equal(validation.rule.condition.values[0].userEnteredValue, "'Довідники'!A2:A");
+  assert.equal(validation.rule.condition.type, "ONE_OF_LIST");
+  assert.deepEqual(validation.rule.condition.values.map((value) => value.userEnteredValue), INITIAL_REQUEST_CATEGORIES);
   const namedRange = categoryNamedRangeRequest(9).addNamedRange.namedRange;
   assert.equal(namedRange.name, "MonstrivRequestCategories");
   assert.equal(namedRange.namedRangeId, undefined);
