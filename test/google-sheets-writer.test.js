@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  appendConfirmedRequest,
+  assertRequestNeedWithinSheetsLimit,
   categoryNamedRangeRequest,
   categoryValidationRequest,
   findApplicationRowsInSpreadsheet,
@@ -16,6 +18,8 @@ import {
 
 const LEGACY_HEADERS = ["Статус", "ID запиту", "Дата", "Потреба", "ПІБ", "Телефон", "Паспорт", "РНОКПП", "Військовий документ", "УБД", "Місто", "Нова пошта", "Інший отримувач", "ПІБ отримувача", "Телефон отримувача"];
 const CATEGORY_HEADERS = ["Статус", "Категорія запиту", ...LEGACY_HEADERS.slice(1)];
+const MILITARY_LEGACY_HEADERS = ["Статус", "ID запиту", "Дата", "Потреба", "ПІБ відповідальної особи", "Телефон", "Номер ВЧ", "Офіційний запит", "Місто", "Нова пошта", "Інший отримувач", "ПІБ отримувача", "Телефон отримувача"];
+const MILITARY_CATEGORY_HEADERS = ["Статус", "Категорія запиту", ...MILITARY_LEGACY_HEADERS.slice(1)];
 const singleRow = (id, headers = LEGACY_HEADERS) => {
   const row = Array(headers.length).fill("");
   row[0] = "Нова";
@@ -51,13 +55,15 @@ function trimValues(values) {
   return rows;
 }
 
-function sheetsMock({ rows = [LEGACY_HEADERS], rowGroups = [], failCollapseOnce = false } = {}) {
+function sheetsMock({ rows = [LEGACY_HEADERS], rowGroups = [], failCollapseOnce = false, failRichTextOnce = false, sheetTitle = "Фізособи" } = {}) {
   const state = {
     rows: rows.map((row) => [...row]),
     rowGroups: rowGroups.map((group) => structuredClone(group)),
     rowCount: 100,
     appendCalls: 0,
     failCollapseOnce,
+    failRichTextOnce,
+    richTextUpdates: [],
   };
   const ensureRow = (rowNumber) => {
     while (state.rows.length < rowNumber) state.rows.push([]);
@@ -88,12 +94,16 @@ function sheetsMock({ rows = [LEGACY_HEADERS], rowGroups = [], failCollapseOnce 
       get: async () => ({
         data: {
           sheets: [{
-            properties: { sheetId: 7, title: "Фізособи", gridProperties: { rowCount: state.rowCount } },
+            properties: { sheetId: 7, title: sheetTitle, gridProperties: { rowCount: state.rowCount } },
             rowGroups: state.rowGroups,
           }],
         },
       }),
       batchUpdate: async ({ requestBody }) => {
+        if (state.failRichTextOnce && (requestBody.requests || []).some((request) => request.updateCells)) {
+          state.failRichTextOnce = false;
+          throw new Error("simulated rich-text failure");
+        }
         for (const request of requestBody.requests || []) {
           if (request.appendDimension) state.rowCount += request.appendDimension.length;
           if (request.addDimensionGroup) {
@@ -110,6 +120,7 @@ function sheetsMock({ rows = [LEGACY_HEADERS], rowGroups = [], failCollapseOnce 
             group.collapsed = wanted.collapsed;
           }
           if (request.updateCells) {
+            state.richTextUpdates.push(structuredClone(request.updateCells));
             const startRow = request.updateCells.range.startRowIndex + 1;
             const startColumn = request.updateCells.range.startColumnIndex;
             for (let rowOffset = 0; rowOffset < (request.updateCells.rows || []).length; rowOffset += 1) {
@@ -144,11 +155,54 @@ function multiRequest(count = 2) {
 
 const ownership = async () => {};
 const confirmedAt = "2026-10-14T08:00:00.000Z";
+const leaseServices = {
+  acquire: async () => true,
+  renew: async () => true,
+  check: async () => true,
+  release: async () => true,
+  heartbeatMs: 1000,
+};
 
 test("layout resolver accepts exact legacy and category headers and rejects ambiguous headers", () => {
   assert.equal(resolveOperatorSheetLayout("Фізособи", LEGACY_HEADERS).applicationIdIndex, 1);
   assert.equal(resolveOperatorSheetLayout("Фізособи", CATEGORY_HEADERS).applicationIdIndex, 2);
   assert.throws(() => resolveOperatorSheetLayout("Фізособи", ["Статус", "ID запиту"]), (error) => error.code === "SHEETS_UNKNOWN_LAYOUT");
+});
+
+for (const length of [10_000, 49_000, 50_000]) {
+  test(`request need with ${length} characters fits one Sheets cell`, () => {
+    const need = "а".repeat(length);
+    assert.deepEqual(assertRequestNeedWithinSheetsLimit({ data: { need } }), {
+      codePoints: length,
+      utf16CodeUnits: length,
+    });
+  });
+}
+
+test("request need with 51,000 characters is rejected before Sheets access", async () => {
+  const request = { type: "individual", data: { need: "а".repeat(51_000) }, documents: {} };
+  assert.throws(() => assertRequestNeedWithinSheetsLimit(request), (error) => error.code === "REQUEST_NEED_TOO_LONG");
+  let sheetsAccessed = false;
+  await assert.rejects(appendConfirmedRequest(request, "2026-10-0099", confirmedAt, {
+    getSpreadsheet: async () => { sheetsAccessed = true; throw new Error("must not access Sheets"); },
+  }), (error) => error.code === "REQUEST_NEED_TOO_LONG");
+  assert.equal(sheetsAccessed, false);
+});
+
+test("request need preserves line breaks, Unicode and emoji in a category-layout row", async () => {
+  const need = "Перший рядок\nДругий рядок — допомога 🚑🇺🇦";
+  const { api, state } = sheetsMock({ rows: [CATEGORY_HEADERS] });
+  await appendConfirmedRequest({
+    type: "individual",
+    data: { name: "Applicant", phone: "hidden", need },
+    documents: {},
+  }, "2026-10-0098", confirmedAt, {
+    getSpreadsheet: async () => ({ spreadsheetId: "sheet" }),
+    sheetsApi: api,
+    leaseServices,
+  });
+  const layout = resolveOperatorSheetLayout("Фізособи", CATEGORY_HEADERS);
+  assert.equal(state.rows[1][layout.needIndex], need);
 });
 
 test("new monthly spreadsheet contract includes the seven-category reference and exact list validation", () => {
@@ -197,6 +251,87 @@ test("category-layout single writer puts the ID in C and preserves operator cate
   await writeConfirmedSingleRequest(args);
   assert.equal(state.rows[1][1], "Детектор");
 });
+
+test("single retry after a post-row rich-text failure reuses the existing master without duplication", async () => {
+  const { api, state } = sheetsMock({ rows: [CATEGORY_HEADERS], failRichTextOnce: true });
+  const layout = resolveOperatorSheetLayout("Фізособи", CATEGORY_HEADERS);
+  const row = singleRow("2026-10-0018", CATEGORY_HEADERS);
+  row[layout.documents.passport] = "passport.jpg";
+  const args = {
+    sheetsApi: api,
+    spreadsheetId: "sheet",
+    sheetId: 7,
+    sheetTitle: "Фізособи",
+    row,
+    documentCells: [{ columnIndex: layout.documents.passport, richText: { text: "passport.jpg", textFormatRuns: [{ startIndex: 0, format: { link: { uri: "https://example.test/passport" } } }] } }],
+    applicationId: "2026-10-0018",
+    assertOwnership: ownership,
+  };
+  await assert.rejects(writeConfirmedSingleRequest(args), /simulated rich-text failure/);
+  assert.equal(state.rows.filter((item) => item[layout.applicationIdIndex] === "2026-10-0018").length, 1);
+  await writeConfirmedSingleRequest(args);
+  assert.equal(state.rows.filter((item) => item[layout.applicationIdIndex] === "2026-10-0018").length, 1);
+  assert.ok(state.richTextUpdates.some((update) => update.range.startColumnIndex === layout.documents.passport));
+});
+
+for (const version of ["legacy", "category"]) {
+  test(`${version} physical and military confirmation writers keep semantic columns, documents and blank category`, async () => {
+    const category = version === "category";
+    const cases = [
+      {
+        title: "Фізособи",
+        headers: category ? CATEGORY_HEADERS : LEGACY_HEADERS,
+        type: "individual",
+        documentKey: "passport",
+        documentName: "passport.jpg",
+        data: { name: "Applicant", phone: "hidden", need: "Need", city: "City", novaPoshtaBranch: "1", recipientAnotherPerson: false },
+      },
+      {
+        title: "Військові частини",
+        headers: category ? MILITARY_CATEGORY_HEADERS : MILITARY_LEGACY_HEADERS,
+        type: "military_unit",
+        documentKey: "official_request",
+        documentName: "official.pdf",
+        data: { name: "Contact", phone: "hidden", need: "Need", militaryUnitNumber: "A1234", city: "City", novaPoshtaBranch: "1", recipientAnotherPerson: false },
+      },
+    ];
+
+    for (const item of cases) {
+      const { api, state } = sheetsMock({ rows: [item.headers], sheetTitle: item.title });
+      const request = {
+        type: item.type,
+        data: item.data,
+        documents: { [item.documentKey]: [{ fileName: item.documentName, driveUrl: "https://example.test/document" }] },
+      };
+      await appendConfirmedRequest(request, "2026-10-0015", confirmedAt, {
+        getSpreadsheet: async () => ({ spreadsheetId: "sheet" }),
+        sheetsApi: api,
+        leaseServices,
+      });
+      const layout = resolveOperatorSheetLayout(item.title, item.headers);
+      assert.equal(state.rows[1][layout.applicationIdIndex], "2026-10-0015");
+      if (category) assert.equal(state.rows[1][layout.categoryIndex], "");
+      assert.equal(state.rows[1][layout.documents[item.documentKey]], item.documentName);
+      assert.ok(state.richTextUpdates.some((update) => update.range.startColumnIndex === layout.documents[item.documentKey]
+        && update.rows?.[0]?.values?.[0]?.textFormatRuns?.[0]?.format?.link?.uri === "https://example.test/document"));
+    }
+  });
+}
+
+for (const [version, headers] of [["legacy", LEGACY_HEADERS], ["category", CATEGORY_HEADERS]]) {
+  test(`${version} multi writer preserves an empty category and beneficiary document links`, async () => {
+    const request = multiRequest();
+    request.beneficiaries[0].documents.passport = [{ fileName: "beneficiary.jpg", driveUrl: "https://example.test/beneficiary" }];
+    const { api, state } = sheetsMock({ rows: [headers] });
+    await writeConfirmedMultiRequest({ sheetsApi: api, spreadsheetId: "sheet", sheetId: 7, request, applicationId: "2026-10-0016", confirmedAt, assertOwnership: ownership });
+    const layout = resolveOperatorSheetLayout("Фізособи", headers);
+    assert.equal(state.rows[1][layout.applicationIdIndex], "2026-10-0016");
+    if (version === "category") assert.equal(state.rows[1][layout.categoryIndex], "");
+    assert.equal(state.rows[2][layout.documents.passport], "beneficiary.jpg");
+    assert.ok(state.richTextUpdates.some((update) => update.range.startColumnIndex === layout.documents.passport
+      && update.rows?.[0]?.values?.[0]?.textFormatRuns?.[0]?.format?.link?.uri === "https://example.test/beneficiary"));
+  });
+}
 
 test("unknown headers fail before a writer update", async () => {
   const { api, state } = sheetsMock({ rows: [["Статус", "Невідома колонка"]] });

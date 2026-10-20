@@ -29,7 +29,7 @@ function makeSheet(title, sheetId, rows) {
   };
 }
 
-function migrationMock({ individualCategory = false, militaryCategory = false, unknown = false, withReference = false, wrongCategoryValidation = false, failCopy = false, failValidation = false, ignoreValidationWrite = false, materializeNamedRangeEnd = false } = {}) {
+function migrationMock({ individualCategory = false, militaryCategory = false, unknown = false, withReference = false, wrongCategoryValidation = false, failCopy = false, failValidation = false, ignoreValidationWrite = false, materializeNamedRangeEnd = false, materializeBlankRowsOnValidation = false, mutateApplicationCellOnValidation = false } = {}) {
   const state = {
     files: [{ id: "monthly-1", name: "Запити-жовтень-2026", mimeType: "application/vnd.google-apps.spreadsheet", parents: ["root"] }],
     sheets: [
@@ -139,6 +139,12 @@ function migrationMock({ individualCategory = false, militaryCategory = false, u
             const target = ensureGridCell(sheet, 1, 1);
             if (request.setDataValidation.rule && !ignoreValidationWrite) target.dataValidation = structuredClone(request.setDataValidation.rule);
             else delete target.dataValidation;
+            if (request.setDataValidation.rule && materializeBlankRowsOnValidation) ensureGridCell(sheet, 99, 1);
+            if (request.setDataValidation.rule && mutateApplicationCellOnValidation && sheet.properties.sheetId === 11) {
+              const changed = ensureGridCell(sheet, 1, 4);
+              changed.formattedValue = "changed";
+              changed.userEnteredValue = { stringValue: "changed" };
+            }
           }
         }
         return { data: { replies: [] } };
@@ -294,6 +300,35 @@ test("API-materialized full-column named range is accepted after creation", asyn
   assert.equal(report.results[0].namedRange.valid, true);
   assert.equal(state.namedRanges[0].range.endRowIndex, 100);
   assert.deepEqual(state.mutations.filter((item) => item.startsWith("insert:")), []);
+});
+
+test("validation materializing absent blank cells and rows does not trigger preserved-content failure", async () => {
+  const { services } = migrationMock({
+    individualCategory: true,
+    militaryCategory: true,
+    withReference: true,
+    wrongCategoryValidation: true,
+    materializeBlankRowsOnValidation: true,
+  });
+  const report = await runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services });
+  assert.equal(report.results[0].result, "migrated");
+});
+
+test("a real application value change remains fail-closed with safe cell diagnostics", async () => {
+  const { services } = migrationMock({
+    individualCategory: true,
+    militaryCategory: true,
+    withReference: true,
+    wrongCategoryValidation: true,
+    mutateApplicationCellOnValidation: true,
+  });
+  await assert.rejects(
+    runCategoryMigration({ mode: "apply", spreadsheetId: "monthly-1", services }),
+    (error) => error.code === "MIGRATION_CONTENT_CHANGED"
+      && error.migrationStage === "verify_preserved_content"
+      && error.message === "Фізособи: preserved content mismatch at E2 (cell_value)"
+      && !error.message.includes("changed"),
+  );
 });
 
 test("migration holds both production writer leases before backup and all mutations", async () => {

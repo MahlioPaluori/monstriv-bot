@@ -25,7 +25,7 @@ import {
 import { downloadWhatsAppMedia } from "../lib/meta-media.js";
 import { filterValidatedDocuments, isValidatedDocument, MediaValidationError } from "../lib/media-validation.js";
 import { createCanonicalApplicantDocumentCopies, finalizeIndividualMultiRequestDocuments, finalizeMilitaryRequestDocuments, getOrCreateApplicantFolder, getOrCreateIndividualMultiBeneficiaryFolder, uploadBufferToDrive } from "../lib/google-drive.js";
-import { appendConfirmedMultiRequest, appendConfirmedRequest, findRequestByApplicationId, getMaxApplicationSequenceForPeriod, updateMilitaryRequestDocumentLinks } from "../lib/google-sheets.js";
+import { appendConfirmedMultiRequest, appendConfirmedRequest, assertRequestNeedWithinSheetsLimit, findRequestByApplicationId, getMaxApplicationSequenceForPeriod, MAX_SHEETS_CELL_CHARACTERS, sheetsTextLength, updateMilitaryRequestDocumentLinks } from "../lib/google-sheets.js";
 import {
   sendActiveRequestNavigation,
   sendApplicationAccepted,
@@ -63,6 +63,25 @@ const EDIT_FIELD_PROMPTS = {
   city: "Введіть нове місто.",
   novaPoshtaBranch: "Введіть нове відділення Нової пошти.",
 };
+const NEED_TOO_LONG_MESSAGE = `Опис потреби завеликий для реєстрації в Google Sheets. Максимум — ${MAX_SHEETS_CELL_CHARACTERS.toLocaleString("uk-UA")} символів. Будь ласка, надішліть коротший опис. Попередній текст не було обрізано.`;
+
+function requestNeedFitsSheets(value) {
+  const lengths = sheetsTextLength(value);
+  return lengths.codePoints <= MAX_SHEETS_CELL_CHARACTERS
+    && lengths.utf16CodeUnits <= MAX_SHEETS_CELL_CHARACTERS;
+}
+
+function logRejectedNeed(stage, value) {
+  const lengths = sheetsTextLength(value);
+  console.info(JSON.stringify({
+    event: "request_need_rejected",
+    stage,
+    errorCode: "REQUEST_NEED_TOO_LONG",
+    codePointLength: lengths.codePoints,
+    utf16CodeUnitLength: lengths.utf16CodeUnits,
+    limit: MAX_SHEETS_CELL_CHARACTERS,
+  }));
+}
 
 function docs(state) { return state.request?.type === "military_unit" ? MILITARY_UNIT_DOCUMENTS : PHYSICAL_DOCUMENTS; }
 function activeBeneficiary(state) { return state.request?.multiPackage ? state.request.beneficiaries?.[state.request.currentBeneficiaryIndex] || null : null; }
@@ -518,6 +537,10 @@ export function getInteractiveReplyId(message) {
 
 export async function applyEditedField(from, state, text, services = {}) {
   const editedField = state.editField;
+  if (editedField === "need" && !requestNeedFitsSheets(text)) {
+    logRejectedNeed("EDIT_TEXT", text);
+    return (services.sendText || sendText)(from, NEED_TOO_LONG_MESSAGE);
+  }
   state.request.data[editedField] = text;
   if (editedField === "name" && state.request.multiPackage && state.request.beneficiaries?.[0]?.isApplicant) {
     state.request.beneficiaries[0].name = text;
@@ -562,6 +585,7 @@ export async function confirmRequest(from, state, assertClaimOwnership, services
     ...services,
   };
   const request = state.request;
+  assertRequestNeedWithinSheetsLimit(request);
   assertRequestDocumentsHaveValidation(request);
   await assertClaimOwnership();
   let persistedConfirmationData = false;
@@ -694,6 +718,19 @@ export async function sendConfirmationFailure(from, state, assertClaimOwnership,
   const applicationId = state.request?.applicationId;
   let sheetsRecorded = false;
 
+  if (error?.code === "REQUEST_NEED_TOO_LONG") {
+    await assertClaimOwnership();
+    state.stage = "EDIT_TEXT";
+    state.editField = "need";
+    const persistState = services.persistState || saveUserState;
+    await persistState(from, state);
+    await assertClaimOwnership();
+    logRejectedNeed("CONFIRMATION", state.request?.data?.need);
+    await sendFailureText(from, NEED_TOO_LONG_MESSAGE);
+    await assertClaimOwnership();
+    return { failed: true, needsShorterNeed: true };
+  }
+
   await assertClaimOwnership();
   if (applicationId) {
     const lookup = await lookupRequest(applicationId);
@@ -726,6 +763,7 @@ export async function sendConfirmationFailure(from, state, assertClaimOwnership,
   confirmationLog("confirmation_recoverable_failure", state.request, {
     sheetsRecorded,
     errorCode: error?.code || "UNKNOWN",
+    needLength: sheetsTextLength(state.request?.data?.need),
   });
   return { failed: true, sheetsRecorded };
 }
@@ -806,6 +844,7 @@ export async function runClaimedConfirmation(from, dependencies = {}) {
     const latestState = await loadState(from);
     if (latestState?.stage !== "CONFIRMATION" || !latestState.request) return { stale: true };
     try {
+      assertRequestNeedWithinSheetsLimit(latestState.request);
       await assertClaimOwnership();
       try {
         await sendProcessingStarted(from, "⏳ Реєструємо вашу заявку. Будь ласка, зачекайте на підтвердження.");
@@ -946,7 +985,7 @@ export default async function handler(req, res) {
     }
     if (state.stage === "IDENTIFICATION" && text) { state.request.data.name = text; if (state.request.type === "military_unit") { state.stage = "MILITARY_UNIT_NUMBER"; await saveUserState(from, state); await sendText(from, "Вкажіть, будь ласка, номер військової частини."); } else { state.stage = "REQUEST_TYPE"; await saveUserState(from, state); await sendText(from, "Дякуємо. Тепер, напишіть, будь ласка, що Вам потрібно"); } return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "MILITARY_UNIT_NUMBER" && text) { state.request.data.militaryUnitNumber = text; state.stage = "REQUEST_TYPE"; await saveUserState(from, state); await sendText(from, "Дякуємо. Тепер, напишіть, будь ласка, що Вам потрібно"); return res.status(200).send("EVENT_RECEIVED"); }
-    if (state.stage === "REQUEST_TYPE" && text) { state.request.data.need = text; if (state.request.type === "individual") { state.stage = "PACKAGE_MODE"; await saveUserState(from, state); await sendPackageModeMenu(from); } else { state.stage = "DOCUMENTS"; state.request.documentIndex = 0; await saveUserState(from, state); await askDocument(from, state); } return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "REQUEST_TYPE" && text) { if (!requestNeedFitsSheets(text)) { logRejectedNeed("REQUEST_TYPE", text); await sendText(from, NEED_TOO_LONG_MESSAGE); return res.status(200).send("EVENT_RECEIVED"); } state.request.data.need = text; if (state.request.type === "individual") { state.stage = "PACKAGE_MODE"; await saveUserState(from, state); await sendPackageModeMenu(from); } else { state.stage = "DOCUMENTS"; state.request.documentIndex = 0; await saveUserState(from, state); await askDocument(from, state); } return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "PACKAGE_MODE") {
       if (buttonId === "package_single") { state.request.multiPackage = false; if (state.request.usingSavedData && Object.keys(state.request.documents || {}).length) { await saveUserState(from, state); await continueAfterSavedData(from, state); } else { state.stage = "DOCUMENTS"; state.request.documentIndex = 0; await saveUserState(from, state); await askDocument(from, state); } }
       else if (buttonId === "package_multi") { state.request.multiPackage = true; state.request.usingSavedApplicantIdentity = Boolean(state.request.usingSavedData); state.stage = "PACKAGE_COUNT"; await saveUserState(from, state); await sendText(from, `Скільки окремих осіб мають надати документи? Введіть ціле число від 2 до ${MAX_MULTI_BENEFICIARIES}.`); }

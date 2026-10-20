@@ -15,7 +15,7 @@ import {
   renewSheetWriteClaim,
 } from "../lib/state.js";
 import { createCanonicalApplicantDocumentCopies, materializeReusedApplicantDocument } from "../lib/google-drive.js";
-import { confirmRequest, handleConfirmationResult, repeatCurrentPrompt, runClaimedConfirmation, sendConfirmationFailure } from "../api/webhook.js";
+import { applyEditedField, confirmRequest, handleConfirmationResult, repeatCurrentPrompt, runClaimedConfirmation, sendConfirmationFailure } from "../api/webhook.js";
 import { buildRequestCardUrl } from "../api/request-card.js";
 
 class FakeRedis {
@@ -645,6 +645,68 @@ test("individual single confirmation keeps its Sheets-profile-success-reset orde
     clearState: async () => { effects.push("reset"); },
   });
   assert.deepEqual(effects, ["sheets", "profile", "whatsapp", "reset"]);
+});
+
+test("single Sheets failure preserves stable confirmation data for a duplicate-safe retry", async () => {
+  const state = { stage: "CONFIRMATION", request: { type: "individual", multiPackage: false, data: { name: "Applicant" }, documents: {} } };
+  const persisted = [];
+  await assert.rejects(confirmRequest("phone", state, async () => {}, {
+    nextApplicationId: async () => "2026-10-0017",
+    persistState: async (_phone, current) => { persisted.push(structuredClone(current)); },
+    appendRequest: async () => { throw Object.assign(new Error("Sheets unavailable"), { code: "SHEETS_TEMPORARY" }); },
+    persistApplicantProfile: async () => { throw new Error("profile must not run"); },
+    sendAccepted: async () => { throw new Error("success must not run"); },
+    clearState: async () => { throw new Error("reset must not run"); },
+  }), (error) => error.code === "SHEETS_TEMPORARY");
+  assert.equal(state.stage, "CONFIRMATION");
+  assert.equal(state.request.applicationId, "2026-10-0017");
+  assert.ok(state.request.confirmedAt);
+  assert.equal(state.request.sheetsRecorded, false);
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].request.applicationId, "2026-10-0017");
+  assert.equal(persisted[0].request.sheetsRecorded, false);
+});
+
+test("oversized need in a restored confirmation state returns to editing before side effects", async () => {
+  const state = {
+    stage: "CONFIRMATION",
+    request: { type: "individual", data: { name: "Applicant", need: "а".repeat(50_001) }, documents: {} },
+  };
+  let sideEffects = 0;
+  const error = await confirmRequest("phone", state, async () => {}, {
+    nextApplicationId: async () => { sideEffects += 1; },
+    appendRequest: async () => { sideEffects += 1; },
+  }).then(() => null, (caught) => caught);
+  assert.equal(error.code, "REQUEST_NEED_TOO_LONG");
+  assert.equal(sideEffects, 0);
+
+  const messages = [];
+  let persisted = 0;
+  const result = await sendConfirmationFailure("phone", state, async () => {}, error, {
+    persistState: async () => { persisted += 1; },
+    sendFailureText: async (_phone, message) => { messages.push(message); },
+  });
+  assert.deepEqual(result, { failed: true, needsShorterNeed: true });
+  assert.equal(state.stage, "EDIT_TEXT");
+  assert.equal(state.editField, "need");
+  assert.equal(state.request.data.need.length, 50_001);
+  assert.equal(persisted, 1);
+  assert.match(messages[0], /50.?000/);
+});
+
+test("oversized edited need is rejected without replacing the saved value", async () => {
+  const state = { stage: "EDIT_TEXT", editField: "need", request: { data: { need: "Попередній опис" } } };
+  const messages = [];
+  let confirmations = 0;
+  await applyEditedField("phone", state, "🚑".repeat(25_001), {
+    sendText: async (_phone, message) => { messages.push(message); },
+    showConfirmation: async () => { confirmations += 1; },
+  });
+  assert.equal(state.request.data.need, "Попередній опис");
+  assert.equal(state.stage, "EDIT_TEXT");
+  assert.equal(state.editField, "need");
+  assert.equal(confirmations, 0);
+  assert.equal(messages.length, 1);
 });
 
 test("a possible WhatsApp timeout after registration does not turn success into a retry failure", async () => {
