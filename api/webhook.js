@@ -11,7 +11,10 @@ import {
   getApplicantProfile,
   getMilitaryContactProfile,
   getUserState,
+  initializeUserSession,
+  isKnownUser,
   getKyivApplicationPeriod,
+  markUserKnown,
   nextDocumentSequence,
   ownsConfirmationClaim,
   releaseConfirmationClaim,
@@ -312,12 +315,109 @@ function hasActiveRequest(state) {
   return Boolean(state?.request) && !["NEW", "MAIN_MENU", "OPERATOR", "CONFIRMED"].includes(state.stage);
 }
 
-export async function handleIceBreakerMessage(from, text, state, services = {}) {
+export function startRequestFromMainMenu(state, from) {
+  const recoveredRequest = state.recoveredFromNew && state.request && typeof state.request === "object"
+    ? state.request
+    : null;
+  state.operatorRequested = false;
+  state.stage = "APPLICANT_TYPE";
+  state.request = recoveredRequest || { type: null, data: { phone: from }, documents: {}, documentIndex: 0 };
+  state.request.data ||= { phone: from };
+  state.request.data.phone ||= from;
+  state.request.documents ||= {};
+  state.request.documentIndex ??= 0;
+  delete state.recoveredFromNew;
+  return state;
+}
+
+export function shouldSilenceInactiveMessage(state, text, buttonId) {
+  return !hasActiveRequest(state) && !isMenuCommand(text) && !buttonId;
+}
+
+export function isIceBreakerMessageText(text) {
   const normalizedText = String(text || "").trim().replace(/\s+/g, " ").toLocaleLowerCase("uk-UA");
-  if (normalizedText !== ICE_BREAKER_TEXT) return false;
+  return normalizedText === ICE_BREAKER_TEXT;
+}
+
+export async function handleIceBreakerMessage(from, text, state, services = {}) {
+  if (!isIceBreakerMessageText(text)) return false;
   if (hasActiveRequest(state)) await (services.sendActiveRequestNavigation || sendActiveRequestNavigation)(from);
   else await (services.sendMainMenu || sendMainMenu)(from);
   return true;
+}
+
+export function shouldIgnoreWebhookMessage(message) {
+  return message?.type === "reaction";
+}
+
+export async function handleMissingStateMessage(from, input, services = {}) {
+  const { text = "", buttonId = null, recoveringNewState = false } = input;
+  const knownUser = services.isKnownUser || isKnownUser;
+  const markKnown = services.markUserKnown || markUserKnown;
+  const loadApplicantProfile = services.getApplicantProfile || getApplicantProfile;
+  const loadMilitaryProfile = services.getMilitaryContactProfile || getMilitaryContactProfile;
+  const loadState = services.getUserState || getUserState;
+  const initializeSession = services.initializeUserSession || initializeUserSession;
+  const showMainMenu = services.sendMainMenu || sendMainMenu;
+  const showActiveNavigation = services.sendActiveRequestNavigation || sendActiveRequestNavigation;
+  const showApplicantTypeMenu = services.sendApplicantTypeMenu || sendApplicantTypeMenu;
+  const showOperatorMenu = services.sendOperatorMenu || sendOperatorMenu;
+  const sendWelcome = services.sendText || sendText;
+
+  if (buttonId === "confirm_request") return true;
+
+  const action = buttonId === "send_request"
+    ? "SEND_REQUEST"
+    : buttonId === "operator"
+      ? "OPERATOR"
+      : isMenuCommand(text) || isIceBreakerMessageText(text)
+        ? "MENU"
+        : "NORMAL";
+
+  if (action === "NORMAL" && !recoveringNewState) {
+    let known = await knownUser(from);
+    if (!known) {
+      const applicantProfile = await loadApplicantProfile(from);
+      const militaryProfile = applicantProfile ? null : await loadMilitaryProfile(from);
+      known = Boolean(applicantProfile || militaryProfile);
+      if (known) await markKnown(from);
+    }
+    if (known) return true;
+  }
+
+  const result = await initializeSession(from, action);
+  if (action === "MENU") {
+    if (hasActiveRequest(result.state)) await showActiveNavigation(from);
+    else await showMainMenu(from);
+  } else if (action === "SEND_REQUEST" && ["CREATED", "ROUTED"].includes(result.status)) {
+    if (result.status === "CREATED") {
+      await sendWelcome(from, messages.welcome.directRequest);
+    }
+    await showApplicantTypeMenu(from);
+  } else if (action === "OPERATOR" && ["CREATED", "ROUTED"].includes(result.status)) {
+    await showOperatorMenu(from);
+  } else if (action === "NORMAL" && result.status === "CREATED") {
+    const latestState = await loadState(from);
+    if (latestState?.stage !== "MAIN_MENU") return true;
+    await sendWelcome(from, messages.welcome.firstContact);
+    const stateBeforeMenu = await loadState(from);
+    if (stateBeforeMenu?.stage !== "MAIN_MENU") return true;
+    await showMainMenu(from);
+  }
+  return true;
+}
+
+export async function backfillKnownUserMarker(from, services = {}) {
+  const knownUser = services.isKnownUser || isKnownUser;
+  const markKnown = services.markUserKnown || markUserKnown;
+  const logFailure = services.logFailure || ((details) => console.error(JSON.stringify(details)));
+  try {
+    if (!await knownUser(from)) await markKnown(from);
+    return true;
+  } catch (error) {
+    logFailure({ event: "known_user_marker_backfill_failed", errorCode: error?.code || "UNKNOWN" });
+    return false;
+  }
 }
 
 export async function handleDocumentStageFallback(from, state, input, services = {}) {
@@ -892,28 +992,25 @@ export default async function handler(req, res) {
     const value = req.body?.entry?.[0]?.changes?.[0]?.value;
     const message = value?.messages?.[0];
     if (!message) return res.status(200).send("EVENT_RECEIVED");
+    if (shouldIgnoreWebhookMessage(message)) return res.status(200).send("EVENT_RECEIVED");
     const from = message.from, text = message.text?.body?.trim() || "", buttonId = getInteractiveReplyId(message), fileId = mediaId(message);
 
     if (["/reset", "reset"].includes(text.toLowerCase())) {
-      await resetUserState(from); await sendText(from, messages.navigation.resetComplete); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
+      await markUserKnown(from); await resetUserState(from); await sendText(from, messages.navigation.resetComplete); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
     }
     let state = await getUserState(from);
-    if (!state && await handleIceBreakerMessage(from, text, state)) return res.status(200).send("EVENT_RECEIVED");
-    if (!state && buttonId === "confirm_request") return res.status(200).send("EVENT_RECEIVED");
     if (!state) {
-      state = await createUserState(from); state.request = { data: { phone: from }, documents: {}, documentIndex: 0 };
-      if (buttonId === "send_request") {
-        state.operatorRequested = false; state.stage = "APPLICANT_TYPE"; state.request = { type: null, data: { phone: from }, documents: {}, documentIndex: 0 }; await saveUserState(from, state);
-        await sendText(from, messages.welcome.directRequest); await sendApplicantTypeMenu(from); return res.status(200).send("EVENT_RECEIVED");
-      }
-      if (buttonId !== "operator") {
-        state.stage = "MAIN_MENU"; await saveUserState(from, state);
-        await sendText(from, messages.welcome.firstContact); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
-      }
-      state.stage = "MAIN_MENU";
+      await handleMissingStateMessage(from, { text, buttonId });
+      return res.status(200).send("EVENT_RECEIVED");
     }
-    if (await restartRequestWithUnvalidatedDocuments(from, state)) return res.status(200).send("EVENT_RECEIVED");
+    if (state.stage === "NEW") {
+      await handleMissingStateMessage(from, { text, buttonId, recoveringNewState: true });
+      return res.status(200).send("EVENT_RECEIVED");
+    }
+    await backfillKnownUserMarker(from);
     if (await handleIceBreakerMessage(from, text, state)) return res.status(200).send("EVENT_RECEIVED");
+    if (shouldSilenceInactiveMessage(state, text, buttonId)) return res.status(200).send("EVENT_RECEIVED");
+    if (await restartRequestWithUnvalidatedDocuments(from, state)) return res.status(200).send("EVENT_RECEIVED");
     if (await handleDocumentStageFallback(from, state, { message, text, buttonId, fileId })) return res.status(200).send("EVENT_RECEIVED");
     if (!text && !buttonId && !fileId) {
       if (state.stage === "MULTI_APPLICANT_INCLUDED" || state.stage === "MULTI_SAVED_DOCUMENTS_DECISION") {
@@ -954,7 +1051,7 @@ export default async function handler(req, res) {
     }
 
     if (state.stage === "MAIN_MENU" && buttonId === "operator") { state.operatorRequested = true; state.stage = "OPERATOR"; await saveUserState(from, state); await sendOperatorMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
-    if (state.stage === "MAIN_MENU" && buttonId === "send_request") { state.operatorRequested = false; state.stage = "APPLICANT_TYPE"; state.request = { type: null, data: { phone: from }, documents: {}, documentIndex: 0 }; await saveUserState(from, state); await sendApplicantTypeMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "MAIN_MENU" && buttonId === "send_request") { startRequestFromMainMenu(state, from); await saveUserState(from, state); await sendApplicantTypeMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
 
     if (state.stage === "APPLICANT_TYPE") {
       if (buttonId === "individual" || buttonId === "military_unit") {
@@ -1084,6 +1181,7 @@ export default async function handler(req, res) {
       return res.status(200).send("EVENT_RECEIVED");
     }
     if (state.stage === "OPERATOR") return res.status(200).send("EVENT_RECEIVED");
+    if (!hasActiveRequest(state)) return res.status(200).send("EVENT_RECEIVED");
     await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
   } catch (error) {
     console.error("Webhook error:", error);
