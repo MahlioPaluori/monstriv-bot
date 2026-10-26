@@ -6,10 +6,12 @@ import {
   assertRequestNeedWithinSheetsLimit,
   categoryNamedRangeRequest,
   categoryValidationRequest,
+  ensureOperatorSheetStructure,
   findApplicationRowsInSpreadsheet,
   INITIAL_REQUEST_CATEGORIES,
   isExpectedCategoryNamedRange,
   newMonthlySpreadsheetSheets,
+  operatorSheetValidationRequests,
   resolveOperatorSheetLayout,
   runWithSheetWriteLease,
   writeConfirmedMultiRequest,
@@ -223,6 +225,60 @@ test("new monthly spreadsheet contract includes the seven-category reference and
   assert.equal(isExpectedCategoryNamedRange({ ...apiNamedRange, range: { ...apiNamedRange.range, endRowIndex: 999 } }, 9, 1000), false);
   assert.equal(isExpectedCategoryNamedRange({ ...apiNamedRange, range: { ...apiNamedRange.range, endRowIndex: 0 } }, 9, 1000), false);
   assert.equal(isExpectedCategoryNamedRange({ ...apiNamedRange, range: { ...apiNamedRange.range, sheetId: 10 } }, 9, 1000), false);
+});
+
+test("new monthly sheets receive initial validation for status and category", () => {
+  for (const [title, headers] of [
+    ["Фізособи", CATEGORY_HEADERS],
+    ["Військові частини", MILITARY_CATEGORY_HEADERS],
+  ]) {
+    const layout = resolveOperatorSheetLayout(title, headers);
+    const requests = operatorSheetValidationRequests(7, layout, { initializeEmpty: true, hasReferenceSheet: true });
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests.map((request) => request.setDataValidation.range.startColumnIndex), [0, 1]);
+    assert.equal(requests[1].setDataValidation.rule.condition.type, "ONE_OF_LIST");
+  }
+});
+
+test("existing monthly spreadsheet structure check preserves category and other manual validation rules", async () => {
+  const batchRequests = [];
+  const headersByTitle = {
+    "Фізособи": CATEGORY_HEADERS,
+    "Військові частини": MILITARY_CATEGORY_HEADERS,
+  };
+  const api = {
+    spreadsheets: {
+      get: async () => ({
+        data: {
+          sheets: [
+            { properties: { sheetId: 7, title: "Фізособи", gridProperties: { rowCount: 100 } }, conditionalFormats: [] },
+            { properties: { sheetId: 8, title: "Військові частини", gridProperties: { rowCount: 100 } }, conditionalFormats: [] },
+            { properties: { sheetId: 9, title: "Довідники", gridProperties: { rowCount: 100 } }, conditionalFormats: [] },
+          ],
+          namedRanges: [{
+            name: "MonstrivRequestCategories",
+            range: { sheetId: 9, startRowIndex: 1, endRowIndex: 100, startColumnIndex: 0, endColumnIndex: 1 },
+          }],
+        },
+      }),
+      values: {
+        get: async ({ range }) => {
+          const title = Object.keys(headersByTitle).find((candidate) => range.startsWith(`'${candidate}'!`));
+          return { data: { values: title ? [headersByTitle[title]] : [] } };
+        },
+      },
+      batchUpdate: async ({ requestBody }) => {
+        batchRequests.push(...requestBody.requests);
+        return { data: {} };
+      },
+    },
+  };
+
+  await ensureOperatorSheetStructure("spreadsheet", { sheetsApi: api });
+
+  assert.equal(batchRequests.some((request) => request.setDataValidation), false);
+  assert.equal(batchRequests.some((request) => request.copyPaste || request.repeatCell), false);
+  assert.deepEqual(batchRequests.filter((request) => request.updateSheetProperties).map((request) => request.updateSheetProperties.properties.sheetId), [7, 8]);
 });
 
 test("category layout leaves operator category blank and keeps it on retry", async () => {
