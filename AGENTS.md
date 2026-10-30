@@ -12,6 +12,10 @@ local VS Code → checks → commit → push main → Vercel deployment
 
 Локальна зміна сама по собі не означає зміну production. Перед переходом між комп'ютерами: зробити commit і push на поточному, а на іншому — `git pull` або clone.
 
+### Поточний pre-release handoff
+
+Production залишається на `main` commit `c3216ff731d16233133eb461dba4ad772592d89d`. Перевірений release підготовлено окремо у `feature/message-optimization` commit `1d33656c535c796b5d59ec9c10315a6c3d13bc50` (`feat: optimize WhatsApp request flow and document uploads`): 19 файлів, локальний suite 207/207. Feature branch уже опублікована на GitHub, але **ще не злита в `main` і не розгорнута у production**. Не описувати нову поведінку як live до окремої перевірки Vercel deployment.
+
 ## Архітектура
 
 - `api/webhook.js` — Vercel webhook, Meta verification, WhatsApp state machine, документи, delivery і confirmation.
@@ -19,6 +23,7 @@ local VS Code → checks → commit → push main → Vercel deployment
 - `lib/state.js` — Redis state, незалежні профілі фізосіб і відповідальних осіб ВЧ, counters та idempotency claims.
 - `lib/meta-media.js` — bounded streaming download WhatsApp media, перевірки Meta/HTTP metadata та передача `Buffer` у validation pipeline.
 - `lib/media-validation.js` — централізована MIME/structure/size validation, canonical extension і validation metadata для media documents.
+- `lib/delivery-address.js` — маркер і helpers нового combined delivery workflow та fallback для історичних Sheets rows.
 - `lib/google-drive.js` — OAuth2 Google Drive, папки, document uploads і post-confirm finalization документів ВЧ та multi-заявок фізосіб.
 - `lib/google-sheets.js` — monthly operator spreadsheets, single rows, multi master/detail blocks, statuses, clickable request IDs, rich-text document links і request-card lookup.
 - `api/request-card.js` — HMAC-захищена printable HTML-картка запиту.
@@ -58,6 +63,18 @@ WhatsApp interactive reply buttons мають містити 1–3 кнопки.
 - Не змінювати validation metadata schema (`version`, MIME, extension, size, SHA-256 і dimensions там, де підтримуються) без regression tests для intake, Redis restore, saved documents і confirmation.
 - При зміні document prompts перевіряти всі п'ять первинних і повторних підказок, включно з `repeatCurrentPrompt()` після `/menu`; текст має зберігати ліміт 5 МБ.
 - Відхилений файл не повинен потрапляти в Drive або `request.documents`; поточний document stage має залишатися доступним для повторного завантаження. Не послаблювати повторну fail-closed перевірку безпосередньо перед confirmation side effects.
+- У release `1d33656` успішний upload є мовчазним: користувач надсилає один або кілька файлів і натискає «Готово». Не повертати окреме success-повідомлення для кожного файла. «Готово» не просуває stage без успішно зареєстрованого файла; optional УБД зберігає «Пропустити».
+- Incoming Drive upload має deterministic SHA-256 marker у `appProperties` (`monstrivIncomingUpload`), lookup до create та повторний lookup після неоднозначного create. Marker доповнює, але не замінює Redis owner-token coordination.
+- Document upload використовує owner token, heartbeat та ownership fences перед/після Drive create і перед Redis completion. Pending upload marker живе до `DOCUMENT_UPLOAD_PENDING_TTL_SECONDS` (15 хвилин), щоб передчасне «Готово» не просунуло stage після короткого lease expiry; зовнішній HTTP-запит, який уже виконується, скасувати неможливо.
+- `documentActionToken` атомарно зберігається в Redis для активного document step і входить у IDs `document_done`/`document_skip`. Token стабільний при повторному prompt, змінюється на наступному документі/заявці та перевіряється разом із beneficiary index/document key. Legacy IDs дозволені лише для state без token; stale callback не змінює stage і повертає актуальний prompt.
+- Legacy document state без `documentActionToken` після першого успішного upload отримує один актуальний interactive prompt із атомарно створеним token. Повторний webhook не повинен дублювати цей prompt.
+- При однозначній Drive-помилці залишати document stage і показувати один interactive retry prompt. При неоднозначному результаті спочатку виконувати marker lookup; не стверджувати, що файл втрачено, доки результат невідомий.
+
+### Оптимізовані WhatsApp-повідомлення
+
+Release `1d33656` об'єднує welcome + main menu, introduction + applicant-type menu для нового `send_request`, повернення з `OPERATOR` + main menu та confirmed-cancel + main menu в один interactive message без зміни IDs. Помилка «надіслано текст замість документа» об'єднується з актуальним document prompt. Військово-обліковий prompt просить один із трьох типів документа, для військового квитка — першу сторінку і розділ 17, після всіх фото — «Готово».
+
+Оптимізації message-count сценаріїв registration failure без Sheets-запису та confirmation claim-lost recovery (сценарії 5 і 6) у цьому release **не реалізовані**. Не змінювати confirmation semantics під виглядом текстової оптимізації.
 
 ### Confirmation flow
 
@@ -100,6 +117,12 @@ Military та individual profiles мають окремі Redis keys і не п�
 
 На `CONFIRMATION` кнопка з видимим текстом «Редагувати» і callback ID `edit_request` переводить state у `EDIT_MENU` до надсилання меню; кнопка підтвердження лишається «Так» (`confirm_request`), а дані заявки не очищаються. Не повертати для `edit_request` неоднозначний label «Ні» і не змінювати callback IDs. `sendEditMenu()` — interactive list, а не набір із понад трьох reply buttons. Вибір поля використовує чинні IDs і повертає заявку до `CONFIRMATION` після редагування. `/menu` не скидає активний request: `resume_request` викликає `repeatCurrentPrompt()`, зокрема відновлює `EDIT_MENU`, document prompt і confirmation. Stale interactive buttons не повинні змінювати stage або втрачати дані.
 
+### Адреса доставки
+
+Новий release для individual single, individual multi та military показує один prompt «Адреса доставки». Повний введений текст, включно з переносами рядків, зберігається у `request.data.city`; `request.data.novaPoshtaBranch` очищається, а `request.data.deliveryAddressFormat = "combined_v1"` встановлюється до показу prompt. Редагування `edit_city`/`edit_np` використовує те саме combined поле.
+
+Не ламати незавершені legacy states: `CITY` без `combined_v1` приймає лише місто й переходить у `NOVA_POSHTA_BRANCH`; наявний `NOVA_POSHTA_BRANCH` продовжує старий prompt. У Sheets schema не змінюється: combined address пишеться в чинну колонку «Місто», колонка «Нова пошта» лишається порожньою. Request card відображає «Адреса доставки», якщо marker доступний; для rows із Sheets fallback такий: непорожня «Нова пошта» означає legacy city/branch, а порожня «Нова пошта» з непорожнім «Місто» — combined address.
+
 ## Secrets та environment variables
 
 Не виводити й не записувати значення secrets у код, логи, документацію, commit або prompt.
@@ -111,6 +134,8 @@ Military та individual profiles мають окремі Redis keys і не п�
 - `VERCEL_PROJECT_PRODUCTION_URL` — Vercel system environment variable для canonical production URL; це не secret і його не потрібно вручну зберігати в репозиторії.
 
 Не змінювати Vercel configuration, secrets або environment variables без явного запиту користувача.
+
+Ізольованого integration environment наразі не підтверджено. Preview може отримати production env credentials; не запускати end-to-end Preview з Redis/Drive/Sheets/WhatsApp, доки окремі ресурси та env scopes не перевірені. POST `/api/webhook` наразі не перевіряє `X-Hub-Signature-256`; не описувати це як виправлене.
 
 Не читати, змінювати, видаляти або «виправляти» production Redis/Sheets/Drive data без прямого дозволу, навіть якщо локальний код містить maintenance helper. Інтеграційні тести з реальними зовнішніми даними також потребують окремого погодження.
 

@@ -4,11 +4,18 @@
 
 Monstriv Bot — WhatsApp-бот для структурованого збору, документування й первинної реєстрації запитів від фізичних осіб і військових частин.
 
-- **IMPLEMENTED** — підтверджено поточним кодом у `main`.
+- **IMPLEMENTED** — підтверджено поточним checked-out кодом; production status завжди звіряється окремо.
 - **PLANNED** — погоджений наступний крок, ще не реалізований.
 - **KNOWN RISK** — відома технічна або процесна межа поточної реалізації.
 
 Код — authoritative source фактичної поведінки. Цей документ — business/project context. Production workflow: local VS Code → checks → commit → push `main` → Vercel deployment. GitHub `main` є source of truth для production deployment, але фактичний live deployment слід підтверджувати окремо.
+
+Стан pre-release handoff на 30.10.2026:
+
+- production branch `main`: `c3216ff731d16233133eb461dba4ad772592d89d`;
+- підготовлений release branch `feature/message-optimization`: `1d33656c535c796b5d59ec9c10315a6c3d13bc50` (`feat: optimize WhatsApp request flow and document uploads`);
+- release містить 19 файлів, опублікований на GitHub і пройшов 207/207 локальних тестів;
+- release **ще не злито в `main` і не розгорнуто у production**; deployment заплановано окремо на нічний час.
 
 ## Архітектура
 
@@ -19,6 +26,7 @@ Monstriv Bot — WhatsApp-бот для структурованого збор�
 - `lib/state.js` — Redis state/profile helpers, monthly counters, media/document claims, confirmation та Sheets writer leases.
 - `lib/meta-media.js` — bounded streaming download WhatsApp media з перевірками Meta/HTTP metadata та контролем розміру.
 - `lib/media-validation.js` — централізована MIME/structure/size validation, canonical extension і validation metadata.
+- `lib/delivery-address.js` — combined-address marker/helpers і fallback classification для даних із Sheets.
 - `lib/google-drive.js` — OAuth2 Drive client, папки, uploads, move/rename та idempotent copies.
 - `lib/google-sheets.js` — monthly spreadsheets, single/multi writer, rich-text links, grouping і read-only request lookup.
 - `api/request-card.js` — HMAC-захищена printable HTML-картка, дані для якої читаються з Sheets.
@@ -34,9 +42,9 @@ Monstriv Bot — WhatsApp-бот для структурованого збор�
 Для нового WhatsApp phone перша обрана дія не губиться під час створення Redis state:
 
 ```text
-send_request → state initialization → короткий welcome → APPLICANT_TYPE
+send_request → state initialization → один combined introduction/APPLICANT_TYPE interactive message
 operator → state initialization → OPERATOR
-довільний текст/інша допустима подія → welcome → MAIN_MENU
+довільний текст/інша допустима подія → один combined welcome/MAIN_MENU interactive message
 ```
 
 Повторно натискати «Відправити запит» після першого `send_request` не потрібно; перед `operator` проміжне main menu не показується.
@@ -60,8 +68,7 @@ Single branch зберігає попередній flow і schema:
 
 ```text
 PACKAGE_MODE → DOCUMENTS
-→ CITY
-→ NOVA_POSHTA_BRANCH
+→ CITY (combined address, `deliveryAddressFormat: "combined_v1"`)
 → RECIPIENT_CHOICE
 → RECIPIENT_NAME → RECIPIENT_PHONE  (лише якщо інший отримувач)
 → CONFIRMATION
@@ -78,8 +85,7 @@ PACKAGE_MODE
 → BENEFICIARY_PHONE
 → DOCUMENTS поточної особи
 → повторити для всіх beneficiaries
-→ CITY
-→ NOVA_POSHTA_BRANCH
+→ CITY (combined address, `deliveryAddressFormat: "combined_v1"`)
 → RECIPIENT_CHOICE
 → RECIPIENT_NAME → RECIPIENT_PHONE  (лише якщо інший отримувач)
 → CONFIRMATION
@@ -96,7 +102,9 @@ request.beneficiaries = [{ name, phone, documents, documentIndex }]
 
 Multi edit stages: `EDIT_BENEFICIARY_SELECT`, `EDIT_BENEFICIARY_FIELD`, `EDIT_BENEFICIARY_TEXT`; підтримано зміну beneficiary name/phone. Зміна count, додавання/видалення beneficiaries і заміна documents через edit menu не реалізовані.
 
-Документи фізособи збираються послідовно: `passport`, `rnokpp`, `military_id`, необов'язковий `ubd`. Для кожного типу підтримано один або кілька WhatsApp `image`/`document`, але вміст допускається лише згідно з політикою Secure Media Upload нижче. Кнопка «Готово» переходить далі лише після щонайменше одного файла; УБД можна пропустити до або після завантаження. Single використовує generic `document_done`/`document_skip`; multi — context-aware `document_done_<beneficiaryIndex>_<docKey>` і `document_skip_<beneficiaryIndex>_<docKey>`. Multi ack/sequence scope містить beneficiary index + document key; stale/malformed buttons не просувають flow, а beneficiary name/phone не є Redis identity.
+Документи фізособи збираються послідовно: `passport`, `rnokpp`, `military_id`, необов'язковий `ubd`. Для кожного типу підтримано один або кілька WhatsApp `image`/`document`, але вміст допускається лише згідно з політикою Secure Media Upload нижче. Успішне збереження кожного файла не створює окремого WhatsApp-повідомлення. Кнопка «Готово» переходить далі лише після щонайменше одного успішно зареєстрованого файла; УБД можна пропустити до або після завантаження.
+
+Поточні `document_done`/`document_skip` IDs містять атомарно збережений 12-hex `documentActionToken`; multi IDs додатково містять beneficiary index і document key. Token стабільний при повторному показі того самого prompt і змінюється при переході до наступного document step або нової заявки. Legacy callback дозволяється лише для state, де token ще відсутній. Stale/malformed кнопки не просувають flow, а beneficiary name/phone не є Redis identity.
 
 Ролі строго розділені:
 
@@ -129,6 +137,18 @@ Fail-closed захист діє у двох точках: `restartRequestWithUnv
 
 Усі п'ять document prompts — паспорт, РНОКПП, військово-обліковий документ, посвідчення УБД та офіційний лист ВЧ — повідомляють про ліміт 5 МБ. Ті самі prompts використовуються при повторному показі кроку, зокрема після `/menu` → `resume_request`.
 
+Release `1d33656` додає upload idempotency/fencing поверх validation pipeline:
+
+- SHA-256 від внутрішнього scope та WhatsApp message ID зберігається у Drive `appProperties` як `monstrivIncomingUpload` без персональних даних;
+- перед Drive create виконується marker lookup; після неоднозначного create lookup повторюється, і знайдений file ID використовується для Redis completion;
+- Redis upload owner token, heartbeat і ownership checks огороджують side effects перед create, після create та перед completion;
+- pending upload marker живе до 15 хвилин (`DOCUMENT_UPLOAD_PENDING_TTL_SECONDS`) і не дозволяє «Готово» просунути stage, поки зовнішній create може бути незавершеним;
+- подвійний callback «Готово», повторна webhook delivery і паралельний upload не повинні вдруге змінити document context;
+- legacy state без `documentActionToken` після першого успішного upload отримує один актуальний interactive prompt; token створюється атомарно, повторна доставка не дублює prompt;
+- при однозначній Drive-помилці користувач отримує один interactive retry prompt, stage і попередні файли зберігаються; при неоднозначному результаті повідомлення не стверджує, що файл втрачено.
+
+Помилка неправильного типу повідомлення тепер об'єднується з актуальною document instruction в одному interactive prompt. Військово-обліковий prompt просить фото військового квитка, посвідчення офіцера або службового посвідчення; для військового квитка потрібні перша сторінка та розділ 17, після всіх фото користувач натискає «Готово».
+
 Під час завершення задачі автоматичний suite пройшов 68/68 тестів; Secure Media Upload окремо успішно перевірено в production. Старі тестові заявки не потребують міграції, додаткове очищення Redis або Google Drive не планується.
 
 ### Військова частина
@@ -141,8 +161,7 @@ APPLICANT_TYPE
 → MILITARY_UNIT_NUMBER
 → REQUEST_TYPE
 → DOCUMENTS (official_request)
-→ CITY
-→ NOVA_POSHTA_BRANCH
+→ CITY (combined address, `deliveryAddressFormat: "combined_v1"`)
 → RECIPIENT_CHOICE
 → RECIPIENT_NAME → RECIPIENT_PHONE  (лише якщо інший отримувач)
 → CONFIRMATION
@@ -151,6 +170,27 @@ APPLICANT_TYPE
 Отже після `official_request` ВЧ **не** переходить напряму до confirmation. Delivery fields для ВЧ використовують ті самі states, що й фізособа, і доступні в edit flow.
 
 Після першої успішно підтвердженої ВЧ-заявки persistent profile `wa:military-contact:<phone>` зберігає canonical ПІБ відповідальної особи. Номер ВЧ у profile не входить. При наступному виборі ВЧ з того самого phone бот автоматично встановлює збережене ПІБ і переходить прямо до `MILITARY_UNIT_NUMBER`. Після введення номера ВЧ бот переходить у `REQUEST_TYPE` і показує той самий prompt потреби, що й для фізособи: «Дякуємо. Тепер, напишіть, будь ласка, що Вам потрібно». Якщо у confirmation через `edit_name` введено інше ПІБ, після успішного підтвердження саме воно стає новим canonical name.
+
+### Адреса доставки
+
+Новий workflow однаковий для individual single, individual multi та military: бот показує один prompt «Адреса доставки», а користувач надсилає повну адресу одним повідомленням. Введене значення, включно з переносами рядків, зберігається в `request.data.city`; `request.data.novaPoshtaBranch` лишається порожнім, а `request.data.deliveryAddressFormat` має значення `"combined_v1"`. Marker встановлюється до першого combined prompt. `edit_city` і legacy `edit_np` відкривають те саме combined edit field і повертають заявку до confirmation.
+
+Сумісність із незавершеними заявками збережена: старий `CITY` без marker приймає місто й переходить у `NOVA_POSHTA_BRANCH`; state, який уже очікує `NOVA_POSHTA_BRANCH`, продовжує старий двоетапний flow. Введені дані не очищаються. Повторний webhook обробляється відповідно до актуального stage.
+
+Google Sheets schema не змінена. Для нового workflow повна адреса пишеться в чинну колонку «Місто», а «Нова пошта» лишається порожньою. Request card показує одне поле «Адреса доставки» і зберігає переноси рядків. Для історичних даних із Sheets fallback fail-safe: непорожня «Нова пошта» означає legacy city/branch; якщо «Нова пошта» порожня, а «Місто» заповнене, картка показує combined address. Явний `deliveryAddressFormat: "combined_v1"`, якщо доступний генератору, має пріоритет.
+
+### Оптимізація вихідних повідомлень
+
+Release `1d33656` зменшує кількість API-відправлень без зміни button IDs або state transitions:
+
+- перший контакт: welcome і main menu об'єднані в один interactive message;
+- новий `send_request`: introduction і applicant type menu об'єднані в один interactive message; для вже routed state лишається стандартний applicant menu;
+- `/menu` і `back_to_menu` з `OPERATOR`: повідомлення про повернення та main menu об'єднані;
+- confirmed cancellation: результат скасування та main menu об'єднані після чинного Redis reset/reinitialization;
+- неправильний тип document input: помилка та поточна instruction об'єднані;
+- успішний file upload є мовчазним до натискання «Готово».
+
+Сценарії оптимізації 5 і 6 — скорочення кількості повідомлень при registration failure без Sheets-запису та при confirmation claim-lost recovery — у release не реалізовані. Чинна fail-safe recovery поведінка не змінювалася.
 
 ### Confirmation
 
@@ -435,7 +475,7 @@ Production number зараз залишається у WhatsApp Business App. Й
 
 Operator handoff залишається high priority, але залежить від завершення production WhatsApp/Coexistence onboarding. Current `OPERATOR` state лише фіксує стан і повідомляє користувача; реальної operator queue/inbox integration ще немає.
 
-## Стан перевірок на 14.10.2026
+## Стан перевірок і pre-release handoff
 
 ### Підтверджено ручним тестуванням
 
@@ -452,7 +492,9 @@ Operator handoff залишається high priority, але залежить �
 
 ### Автоматизовані локальні перевірки
 
-На момент завершення Secure Media Upload `node --test` проходив 68/68 тестів. Після подальших regression tests для document concurrency, request-card documents, confirmation labels і navigation актуальний локальний suite станом на 15.10.2026 проходить 94/94. Suite включає media validation і bounded download, legacy Redis-state safeguards, document prompts, confirmation claims/lifecycle, application ID allocation, Drive-copy idempotency mocks, Sheets writer/master-detail recovery, edit-menu/list payload, confirmation button labels і navigation recovery. Це mock/local coverage, а не підтвердження доступності чи exactly-once поведінки зовнішніх сервісів; production-перевірка Secure Media Upload зафіксована окремо вище.
+Історичні checkpoints: після Secure Media Upload `node --test` проходив 68/68, а після ранніх document/navigation regressions — 94/94. Актуальний release `1d33656` станом на 30.10.2026 проходить **207/207** локальних тестів. Suite включає media validation і bounded download, legacy Redis-state safeguards, tokenized document prompts, upload lease/pending coordination, Drive-create idempotency mocks, confirmation claims/lifecycle, application ID allocation, Sheets writer/master-detail recovery, combined/legacy delivery address, request-card rendering, edit-menu/list payload, operator silence та navigation recovery.
+
+Це mock/local coverage, а не підтвердження доступності чи exactly-once поведінки зовнішніх сервісів. Для release `1d33656` реальні Redis, Google Drive, Google Sheets і WhatsApp інтеграції ще не перевірялися; попередня production-перевірка Secure Media Upload стосується старішого production baseline.
 
 Інші сценарії не слід вважати ручно перевіреними лише на підставі коду або mock-тестів.
 
@@ -477,6 +519,11 @@ Operator handoff залишається high priority, але залежить �
 8. Структурна перевірка дозволених media formats не замінює антивірусне сканування.
 9. Приймання HEIC/HEIF залежить від фактичної підтримки цих media formats у Meta WhatsApp Cloud API; валідатор перевіряє ISO BMFF container/brands, але не декодує зображення повністю.
 10. PDF validation перевіряє структуру й відхиляє відомі небезпечні конструкції, але не є повноцінним malware scanner або Content Disarm and Reconstruction (CDR).
+11. Ізольованого integration environment не підтверджено. Vercel Preview може отримати production credentials; код не перемикає Redis, Google root folder або WhatsApp number за `VERCEL_ENV`.
+12. POST `/api/webhook` наразі не перевіряє Meta `X-Hub-Signature-256`; GET verification token не автентифікує POST delivery.
+13. Message-count оптимізації registration failure без Sheets-запису та claim-lost recovery (сценарії 5 і 6) не реалізовані.
+14. Pending upload marker має обмежене 15-хвилинне вікно. Ownership fencing не може скасувати Drive HTTP create, який уже почав виконуватися; екстремально довгий зовнішній запит може пережити це вікно.
+15. Rollback лише коду до `c3216ff` може бути несумісним із Redis states, уже створеними release `1d33656` (`documentActionToken`, combined delivery marker та нова upload coordination). Перед rollback потрібна оцінка активних заявок; Redis не очищати автоматично.
 
 ## Environment variables
 
@@ -490,10 +537,34 @@ Operator handoff залишається high priority, але залежить �
 
 ## Development history
 
-Актуальний code HEAD перед локальним documentation update:
+Production baseline перед deployment release:
 
 ```text
-6c7b3fa fix: align military request prompt with individual flow
+c3216ff731d16233133eb461dba4ad772592d89d fix: preserve operator sheet dropdown validation
+```
+
+Підготовлений і опублікований feature release, ще не merged/deployed:
+
+```text
+1d33656c535c796b5d59ec9c10315a6c3d13bc50 feat: optimize WhatsApp request flow and document uploads
 ```
 
 Останні milestones: multi saved-applicant document reuse і safe confirmation (`c24a2e9`), Kyiv monthly application IDs (`a96ab97`), Redis-serialized explicit-range Sheets writer (`2f57721`), suppression conflicting confirmation messages (`ff0dffb`), WhatsApp list edit menu (`d264820`), Secure Media Upload із legacy-state fail-closed enforcement (`889f7d4`), уточнений label confirmation-кнопки «Редагувати» (`23b2fbb`) та уніфікований prompt потреби для ВЧ й фізособи (`6c7b3fa`). Раніше реалізовано military contact profile, clickable request-card IDs, first-contact UX, military Drive/Sheets finalization, individual multi flow, printable multi request card і Meta Embedded Signup callback.
+
+## Нічний deployment runbook для release `1d33656`
+
+### Підготовка — production не змінюється
+
+1. На домашньому комп'ютері відкрити наявний clone, перевірити чистий `git status --short`, виконати `git fetch origin --prune` і перейти на `feature/message-optimization`. Якщо локальної гілки немає: `git switch --track -c feature/message-optimization origin/feature/message-optimization`.
+2. Виконати `git merge --ff-only origin/feature/message-optimization` і перевірити `git rev-parse HEAD`; очікується `1d33656c535c796b5d59ec9c10315a6c3d13bc50`.
+3. Запустити `node --test`, syntax checks змінених JS-файлів і `git diff --check`.
+4. Виконати `git fetch origin --prune`, перевірити `git rev-parse origin/main`; до погодженого deployment очікується `c3216ff731d16233133eb461dba4ad772592d89d`. Якщо SHA інший — зупинитися.
+5. Перевірити `git diff --stat origin/main...origin/feature/message-optimization`, `git diff --name-status ...` і фактичний diff. Очікується один release commit і 19 файлів; `.gitignore`, env/config/secrets не повинні входити.
+
+### Production-changing дії — лише після окремого підтвердження
+
+6. У чистому worktree перейти на `main`, виконати `git merge --ff-only origin/main`, потім `git merge --ff-only origin/feature/message-optimization`. Переконатися, що HEAD дорівнює `1d33656c535c796b5d59ec9c10315a6c3d13bc50`.
+7. Ще раз запустити тести й `git diff origin/main...HEAD --check`. Лише після окремого дозволу виконати `git push origin main`; force-push заборонений.
+8. У Vercel перевірити production deployment: source branch `main`, commit `1d33656`, status `Ready`, відсутність build/runtime errors. Не вважати push доказом успішного deployment.
+9. Виконати одну контрольну синтетичну заявку без персональних production-даних: перевірити welcome/navigation, upload одного й кількох файлів, «Готово», combined address, Sheets row/links, Drive files і signed request card. Врахувати, що окремого isolated integration environment немає.
+10. При блокувальній помилці не очищати Redis/Drive/Sheets. Погоджений code rollback робити новим revert commit від `1d33656` у `main`, повторити тести й push лише з окремого дозволу. Простий redeploy старого commit або `git revert 1d33656` не гарантує сумісність активних Redis states, створених новою версією; спочатку оцінити `stage`, `documentActionToken`, pending uploads і `deliveryAddressFormat` без масового сканування чи запису.
