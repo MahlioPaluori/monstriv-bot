@@ -121,6 +121,8 @@ test("rejected media never reaches Drive or mutates request documents", async ()
   await assert.rejects(saveIncomingDocument("phone", state, { type: "document" }, "media", { key: "passport" }, {
     beginDocumentUpload: async () => "STARTED",
     failDocumentUpload: async () => {},
+    ownsDocumentUpload: async () => true,
+    renewDocumentUpload: async () => true,
     downloadWhatsAppMedia: async () => { throw new MediaValidationError("INVALID_MEDIA", "bad file"); },
     uploadBufferToDrive: async () => { driveUploads += 1; },
   }), { code: "INVALID_MEDIA" });
@@ -136,6 +138,8 @@ test("successful upload stores validation metadata and canonical extension", asy
   await saveIncomingDocument("phone", state, { type: "document", document: { filename: "malware.exe" } }, "media", { key: "passport" }, {
     beginDocumentUpload: async () => "STARTED",
     failDocumentUpload: async () => {},
+    ownsDocumentUpload: async () => true,
+    renewDocumentUpload: async () => true,
     downloadWhatsAppMedia: async () => ({ buffer, mimeType: "image/jpeg", fileSize: buffer.length, extension: ".jpg", validation }),
     getOrCreateApplicantFolder: async () => ({ id: "folder" }),
     nextDocumentSequence: async () => 1,

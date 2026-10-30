@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   acquireConfirmationClaim,
   advanceDocumentStage,
@@ -8,6 +8,7 @@ import {
   createApplicationNumber,
   createUserState,
   failDocumentUpload,
+  ensureDocumentActionToken,
   getApplicantProfile,
   getMilitaryContactProfile,
   getUserState,
@@ -16,6 +17,7 @@ import {
   getKyivApplicationPeriod,
   markUserKnown,
   nextDocumentSequence,
+  ownsDocumentUpload,
   ownsConfirmationClaim,
   releaseConfirmationClaim,
   renewDocumentUpload,
@@ -28,21 +30,21 @@ import {
 import { downloadWhatsAppMedia } from "../lib/meta-media.js";
 import { filterValidatedDocuments, isValidatedDocument, MediaValidationError } from "../lib/media-validation.js";
 import { messages } from "../lib/messages.js";
+import { markCombinedDeliveryAddressWorkflow, setCombinedDeliveryAddress, usesCombinedDeliveryAddress } from "../lib/delivery-address.js";
 import { createCanonicalApplicantDocumentCopies, finalizeIndividualMultiRequestDocuments, finalizeMilitaryRequestDocuments, getOrCreateApplicantFolder, getOrCreateIndividualMultiBeneficiaryFolder, uploadBufferToDrive } from "../lib/google-drive.js";
-import { appendConfirmedMultiRequest, appendConfirmedRequest, assertRequestNeedWithinSheetsLimit, findRequestByApplicationId, getMaxApplicationSequenceForPeriod, MAX_SHEETS_CELL_CHARACTERS, sheetsTextLength, updateMilitaryRequestDocumentLinks } from "../lib/google-sheets.js";
+import { appendConfirmedMultiRequest, appendConfirmedRequest, assertRequestDeliveryAddressWithinSheetsLimit, assertRequestNeedWithinSheetsLimit, findRequestByApplicationId, getMaxApplicationSequenceForPeriod, MAX_SHEETS_CELL_CHARACTERS, sheetsTextLength, updateMilitaryRequestDocumentLinks } from "../lib/google-sheets.js";
 import {
   sendActiveRequestNavigation,
   sendApplicationAccepted,
   sendApplicantTypeMenu,
   sendBeneficiaryEditFieldMenu,
   sendCancelRequestConfirmation,
-  sendDocumentDone,
+  sendDocumentPrompt,
   sendEditMenu,
   sendMainMenu,
   sendMultiApplicantIncludedMenu,
   sendMultiSavedDocumentsMenu,
   sendOperatorMenu,
-  sendOptionalDocumentPrompt,
   sendPackageModeMenu,
   sendReturningApplicantMenu,
   sendText,
@@ -62,6 +64,7 @@ const MENU_COMMANDS = new Set(["/menu", "меню", "/start", "start", "стар
 const ICE_BREAKER_TEXT = "натисніть на це повідомлення, щоб почати";
 const EDIT_FIELD_PROMPTS = messages.editing.fieldPrompts;
 const NEED_TOO_LONG_MESSAGE = messages.confirmation.needTooLong({ limit: MAX_SHEETS_CELL_CHARACTERS });
+const DELIVERY_ADDRESS_TOO_LONG_MESSAGE = messages.applicant.deliveryAddressTooLong({ limit: MAX_SHEETS_CELL_CHARACTERS });
 
 function requestNeedFitsSheets(value) {
   const lengths = sheetsTextLength(value);
@@ -168,14 +171,42 @@ function startMultiCollection(request, from, applicantMode = "none") {
     request.currentBeneficiaryIndex = applicantMode === "saved" ? 1 : 0;
   }
 }
-function parseMultiDocumentButton(buttonId) {
-  const match = /^document_(done|skip)_(\d+)_(passport|rnokpp|military_id|ubd)$/.exec(buttonId || "");
-  return match ? { action: match[1], beneficiaryIndex: Number(match[2]), documentKey: match[3] } : null;
+export function parseDocumentButton(buttonId) {
+  const value = buttonId || "";
+  const legacySingle = /^document_(done|skip)$/.exec(value);
+  if (legacySingle) return { action: legacySingle[1], legacy: true, beneficiaryIndex: null, documentKey: null, token: null };
+  const legacyMulti = /^document_(done|skip)_(\d+)_(passport|rnokpp|military_id|ubd)$/.exec(value);
+  if (legacyMulti) return { action: legacyMulti[1], legacy: true, beneficiaryIndex: Number(legacyMulti[2]), documentKey: legacyMulti[3], token: null };
+  const currentSingle = /^document_(done|skip)_t([a-f0-9]{12})_(passport|rnokpp|military_id|ubd|official_request)$/.exec(value);
+  if (currentSingle) return { action: currentSingle[1], legacy: false, beneficiaryIndex: null, documentKey: currentSingle[3], token: currentSingle[2] };
+  const currentMulti = /^document_(done|skip)_t([a-f0-9]{12})_(\d+)_(passport|rnokpp|military_id|ubd)$/.exec(value);
+  return currentMulti ? { action: currentMulti[1], legacy: false, beneficiaryIndex: Number(currentMulti[3]), documentKey: currentMulti[4], token: currentMulti[2] } : null;
+}
+export function documentButtonMatchesState(state, parsed) {
+  if (!parsed) return false;
+  const doc = currentDoc(state);
+  const store = activeDocumentStore(state);
+  if (!doc || !store) return false;
+  const beneficiaryIndex = state.request?.multiPackage ? state.request.currentBeneficiaryIndex : null;
+  if (parsed.legacy) {
+    if (store.documentActionToken) return false;
+    if (state.request?.multiPackage) return parsed.beneficiaryIndex === beneficiaryIndex && parsed.documentKey === doc.key;
+    return parsed.beneficiaryIndex === null && parsed.documentKey === null;
+  }
+  return parsed.token === store.documentActionToken
+    && parsed.beneficiaryIndex === beneficiaryIndex
+    && parsed.documentKey === doc.key;
 }
 function mediaId(message) {
   if (message.type === "image") return message.image?.id || null;
   if (message.type === "document") return message.document?.id || null;
   return null;
+}
+
+export function beginCombinedDeliveryAddressStep(state) {
+  state.stage = "CITY";
+  markCombinedDeliveryAddressWorkflow(state.request.data);
+  return state;
 }
 function documentsAreOlderThanYear(dateString) {
   if (!dateString) return true;
@@ -239,6 +270,7 @@ export async function saveIncomingDocument(from, state, message, fileId, doc, se
   const completeUpload = services.completeDocumentUpload || completeDocumentUpload;
   const failUpload = services.failDocumentUpload || failDocumentUpload;
   const renewUpload = services.renewDocumentUpload || renewDocumentUpload;
+  const checkUpload = services.ownsDocumentUpload || ownsDocumentUpload;
   const downloadMedia = services.downloadWhatsAppMedia || downloadWhatsAppMedia;
   const uploadDrive = services.uploadBufferToDrive || uploadBufferToDrive;
   const getApplicantFolder = services.getOrCreateApplicantFolder || getOrCreateApplicantFolder;
@@ -248,14 +280,32 @@ export async function saveIncomingDocument(from, state, message, fileId, doc, se
   const documentIndex = activeDocumentStore(state).documentIndex || 0;
   const beneficiaryIndex = beneficiary ? state.request.currentBeneficiaryIndex : null;
   const uploadId = message.id || fileId;
-  const beginStatus = await beginUpload(from, uploadId, { documentIndex, beneficiaryIndex, documentKey: doc.key });
+  const ownerToken = services.ownerToken || randomUUID();
+  const markerScope = `${documentIndex}:${beneficiaryIndex === null ? "single" : beneficiaryIndex}:${doc.key}`;
+  const marker = createHash("sha256").update(`monstriv-incoming-upload:v1\0${markerScope}\0${uploadId}`).digest("hex");
+  const beginStatus = await beginUpload(from, uploadId, { documentIndex, beneficiaryIndex, documentKey: doc.key }, ownerToken);
   if (beginStatus !== "STARTED") return { status: String(beginStatus).toLowerCase() };
+  let uploadLeaseLost = false;
   const heartbeat = setInterval(() => {
-    renewUpload(from, uploadId).catch((error) => console.error("Document upload lease renewal failed:", error?.message || "Unknown error"));
-  }, 30_000);
+    renewUpload(from, uploadId, ownerToken)
+      .then((renewed) => { if (!renewed) uploadLeaseLost = true; })
+      .catch((error) => {
+        uploadLeaseLost = true;
+        console.error("Document upload lease renewal failed:", error?.message || "Unknown error");
+      });
+  }, services.heartbeatIntervalMs || 30_000);
   heartbeat.unref?.();
+  const assertUploadOwnership = async () => {
+    if (uploadLeaseLost || !await checkUpload(from, uploadId, ownerToken)) {
+      uploadLeaseLost = true;
+      const error = new Error("Document upload lease was lost");
+      error.code = "DOCUMENT_UPLOAD_LEASE_LOST";
+      throw error;
+    }
+  };
   try {
     const media = await downloadMedia(fileId);
+    await assertUploadOwnership();
     let folder;
     if (beneficiary) {
       folder = await getMultiFolder(state.request.data.name, beneficiary.name);
@@ -264,22 +314,75 @@ export async function saveIncomingDocument(from, state, message, fileId, doc, se
       if (!identifier) throw new Error("Applicant identifier is missing for Drive folder");
       folder = await getApplicantFolder(state.request.type, identifier);
     }
+    await assertUploadOwnership();
     const sequenceScope = beneficiary ? `multi:${state.request.currentBeneficiaryIndex}:${doc.key}` : doc.key;
     const sequence = await nextSequence(from, sequenceScope);
     const extension = media.extension;
     if (!extension || !media.validation) throw new MediaValidationError("INVALID_MEDIA", "Validated media metadata is missing");
     const fileName = `${doc.key}${sequence}${extension}`;
-    const driveFile = await uploadDrive({ buffer: media.buffer, name: fileName, mimeType: media.mimeType, parentId: folder.id });
+    await assertUploadOwnership();
+    const driveFile = await uploadDrive({ buffer: media.buffer, name: fileName, mimeType: media.mimeType, parentId: folder.id, idempotencyMarker: marker });
+    await assertUploadOwnership();
     const document = { mediaId: fileId, type: message.type, receivedAt: new Date().toISOString(), driveFileId: driveFile.id, driveUrl: driveFile.webViewLink || `https://drive.google.com/file/d/${driveFile.id}/view`, fileName: driveFile.name, mimeType: media.mimeType, fileSize: media.fileSize, validation: media.validation };
-    const result = await completeUpload(from, uploadId, { documentIndex, beneficiaryIndex, documentKey: doc.key, document });
+    const completionContext = { documentIndex, beneficiaryIndex, documentKey: doc.key, document };
+    await assertUploadOwnership();
+    let result;
+    try {
+      result = await completeUpload(from, uploadId, completionContext, ownerToken);
+    } catch (firstError) {
+      const loadedState = await (services.getUserState || getUserState)(from).catch(() => null);
+      const loadedStore = beneficiaryIndex === null ? loadedState?.request : loadedState?.request?.beneficiaries?.[beneficiaryIndex];
+      const existingFiles = loadedStore?.documents?.[doc.key] || [];
+      if (existingFiles.some((existing) => existing?.mediaId === fileId)) {
+        result = { status: "DUPLICATE", count: existingFiles.length, state: loadedState };
+      } else {
+        await assertUploadOwnership();
+        try {
+          result = await completeUpload(from, uploadId, completionContext, ownerToken);
+        } catch {
+          const unknown = new Error("Document upload registration result could not be verified");
+          unknown.code = "DOCUMENT_UPLOAD_RESULT_UNKNOWN";
+          throw unknown;
+        }
+      }
+    }
+    if (result.status === "STALE") {
+      const error = new Error("Document upload completion is stale");
+      error.code = "DOCUMENT_UPLOAD_LEASE_LOST";
+      throw error;
+    }
     if (result.state) Object.assign(state, result.state);
     if (result.status !== "ADDED") return { status: String(result.status).toLowerCase(), count: result.count || 0 };
     return { status: "added", count: result.count, document };
   } catch (error) {
-    await failUpload(from, uploadId);
+    try { await failUpload(from, uploadId, ownerToken); }
+    catch (cleanupError) { console.error("Document upload claim cleanup failed:", cleanupError?.message || "Unknown error"); }
     throw error;
   } finally {
     clearInterval(heartbeat);
+  }
+}
+
+export async function handleDocumentFileUpload(from, state, message, fileId, doc, services = {}) {
+  const saveDocument = services.saveIncomingDocument || saveIncomingDocument;
+  const notify = services.sendText || sendText;
+  const legacyPromptRequired = !activeDocumentStore(state)?.documentActionToken;
+  try {
+    const result = await saveDocument(from, state, message, fileId, doc, services.uploadServices);
+    if (legacyPromptRequired && ["added", "duplicate"].includes(result?.status)) {
+      await (services.sendDocumentStepPrompt || sendDocumentStepPrompt)(from, state, null, { onlyIfTokenCreated: true });
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof MediaValidationError) {
+      await notify(from, error.userMessage);
+      return { status: "rejected", errorCode: error.code };
+    }
+    const issue = ["DRIVE_UPLOAD_RESULT_UNKNOWN", "DOCUMENT_UPLOAD_RESULT_UNKNOWN", "DOCUMENT_UPLOAD_LEASE_LOST"].includes(error?.code)
+      ? messages.documents.uploadResultUnknown
+      : messages.documents.saveFailed;
+    await (services.sendDocumentStepPrompt || sendDocumentStepPrompt)(from, state, issue);
+    return { status: "failed", errorCode: error?.code || "UNKNOWN" };
   }
 }
 
@@ -362,7 +465,6 @@ export async function handleMissingStateMessage(from, input, services = {}) {
   const showActiveNavigation = services.sendActiveRequestNavigation || sendActiveRequestNavigation;
   const showApplicantTypeMenu = services.sendApplicantTypeMenu || sendApplicantTypeMenu;
   const showOperatorMenu = services.sendOperatorMenu || sendOperatorMenu;
-  const sendWelcome = services.sendText || sendText;
 
   if (buttonId === "confirm_request") return true;
 
@@ -390,21 +492,43 @@ export async function handleMissingStateMessage(from, input, services = {}) {
     if (hasActiveRequest(result.state)) await showActiveNavigation(from);
     else await showMainMenu(from);
   } else if (action === "SEND_REQUEST" && ["CREATED", "ROUTED"].includes(result.status)) {
-    if (result.status === "CREATED") {
-      await sendWelcome(from, messages.welcome.directRequest);
-    }
-    await showApplicantTypeMenu(from);
+    await showApplicantTypeMenu(from, result.status === "CREATED" ? messages.welcome.directRequest : undefined);
   } else if (action === "OPERATOR" && ["CREATED", "ROUTED"].includes(result.status)) {
     await showOperatorMenu(from);
   } else if (action === "NORMAL" && result.status === "CREATED") {
     const latestState = await loadState(from);
     if (latestState?.stage !== "MAIN_MENU") return true;
-    await sendWelcome(from, messages.welcome.firstContact);
     const stateBeforeMenu = await loadState(from);
     if (stateBeforeMenu?.stage !== "MAIN_MENU") return true;
-    await showMainMenu(from);
+    await showMainMenu(from, messages.welcome.firstContact);
   }
   return true;
+}
+
+export async function returnFromOperatorToMainMenu(from, state, services = {}) {
+  const persistState = services.saveUserState || saveUserState;
+  const showMainMenu = services.sendMainMenu || sendMainMenu;
+  state.operatorRequested = false;
+  state.stage = "MAIN_MENU";
+  await persistState(from, state);
+  await showMainMenu(from, messages.navigation.returnedToMainMenu);
+}
+
+export function isOperatorReturnAction(state, text, buttonId) {
+  return state?.stage === "OPERATOR" && (buttonId === "back_to_menu" || isMenuCommand(text));
+}
+
+export async function completeRequestCancellation(from, services = {}) {
+  const clearState = services.resetUserState || resetUserState;
+  const createState = services.createUserState || createUserState;
+  const persistState = services.saveUserState || saveUserState;
+  const showMainMenu = services.sendMainMenu || sendMainMenu;
+  await clearState(from);
+  const state = await createState(from);
+  state.stage = "MAIN_MENU";
+  await persistState(from, state);
+  await showMainMenu(from, messages.navigation.requestCancelled);
+  return state;
 }
 
 export async function backfillKnownUserMarker(from, services = {}) {
@@ -436,10 +560,8 @@ export async function handleDocumentStageFallback(from, state, input, services =
     return true;
   }
   if (text && !isMenuCommand(text)) {
-    const notify = services.sendText || sendText;
-    const repeatPrompt = services.repeatCurrentPrompt || repeatCurrentPrompt;
-    await notify(from, messages.documents.expectedFileInsteadOfText);
-    await repeatPrompt(from, state);
+    const showDocumentPrompt = services.sendDocumentStepPrompt || sendDocumentStepPrompt;
+    await showDocumentPrompt(from, state, messages.documents.expectedFileInsteadOfText);
     return true;
   }
   return false;
@@ -461,15 +583,14 @@ function isValidButtonForStage(state, buttonId) {
   };
   if (state.stage === "DOCUMENTS") {
     if (state.request?.multiPackage) {
-      const parsed = parseMultiDocumentButton(buttonId);
+      const parsed = parseDocumentButton(buttonId);
       const doc = currentDoc(state);
       return Boolean(parsed && doc
-        && parsed.beneficiaryIndex === state.request.currentBeneficiaryIndex
-        && parsed.documentKey === doc.key
+        && documentButtonMatchesState(state, parsed)
         && (parsed.action === "done" || (parsed.action === "skip" && doc.optional)));
     }
-    const doc = currentDoc(state);
-    return buttonId === "document_done" || (buttonId === "document_skip" && doc?.optional);
+    const doc = currentDoc(state), parsed = parseDocumentButton(buttonId);
+    return Boolean(documentButtonMatchesState(state, parsed) && (parsed.action === "done" || (parsed.action === "skip" && doc?.optional)));
   }
   if (state.stage === "EDIT_MENU") {
     const valid = ["edit_name", "edit_need", "edit_city", "edit_np", "edit_recipient"];
@@ -503,22 +624,43 @@ async function askDocument(from, state) {
       }
     }
     if (state.request.usingSavedData) return showConfirmation(from, state);
-    state.stage = "CITY";
+    beginCombinedDeliveryAddressStep(state);
     await saveUserState(from, state);
-    return sendText(from, messages.applicant.city);
+    return sendText(from, messages.applicant.deliveryAddress);
   }
-  if (doc.optional) {
-    const beneficiary = activeBeneficiary(state);
-    const context = beneficiary ? { beneficiaryIndex: state.request.currentBeneficiaryIndex, documentKey: doc.key } : null;
-    return sendOptionalDocumentPrompt(from, doc.uploadPrompt, context);
-  }
-  await sendText(from, messages.documents.uploadMore({ prompt: doc.uploadPrompt }));
+  return sendDocumentStepPrompt(from, state);
+}
+
+export async function sendDocumentStepPrompt(from, state, issue = null, services = {}) {
+  const doc = currentDoc(state);
+  if (!doc) return null;
+  const beneficiary = activeBeneficiary(state);
+  const store = activeDocumentStore(state);
+  const beneficiaryIndex = beneficiary ? state.request.currentBeneficiaryIndex : null;
+  const ensureToken = services.ensureDocumentActionToken || ensureDocumentActionToken;
+  const tokenResult = store.documentActionToken
+    ? { status: "READY", token: store.documentActionToken, state }
+    : await ensureToken(from, {
+      documentIndex: store.documentIndex || 0,
+      beneficiaryIndex,
+      documentKey: doc.key,
+      proposedToken: randomUUID().replaceAll("-", "").slice(0, 12),
+    });
+  if (!["CREATED", "READY"].includes(tokenResult?.status) || !tokenResult.token) return null;
+  if (tokenResult.state) Object.assign(state, tokenResult.state);
+  if (services.onlyIfTokenCreated && tokenResult.status !== "CREATED") return null;
+  const context = { token: tokenResult.token, beneficiaryIndex, documentKey: doc.key };
+  const body = doc.optional
+    ? messages.documents.optionalPrompt({ prompt: doc.uploadPrompt })
+    : messages.documents.prompt({ prompt: doc.uploadPrompt });
+  const finalBody = issue ? messages.documents.withIssue({ issue, prompt: body }) : body;
+  return (services.sendDocumentPrompt || sendDocumentPrompt)(from, finalBody, Boolean(doc.optional), context);
 }
 
 export async function advanceCurrentDocument(from, state, doc, requireFiles, services = {}) {
   const advance = services.advanceDocumentStage || advanceDocumentStage;
-  const notify = services.sendText || sendText;
   const continueFlow = services.askDocument || askDocument;
+  const showDocumentPrompt = services.sendDocumentStepPrompt || sendDocumentStepPrompt;
   const store = activeDocumentStore(state);
   const result = await advance(from, {
     documentIndex: store.documentIndex || 0,
@@ -527,11 +669,11 @@ export async function advanceCurrentDocument(from, state, doc, requireFiles, ser
     requireFiles,
   });
   if (result.status === "BUSY") {
-    await notify(from, messages.documents.uploadStillRunning);
+    await showDocumentPrompt(from, state, messages.documents.uploadStillRunning);
     return result;
   }
   if (result.status === "EMPTY") {
-    await notify(from, messages.documents.currentStepFirst({ prompt: doc.uploadPrompt }));
+    await showDocumentPrompt(from, state, messages.documents.currentStepFirst);
     return result;
   }
   if (result.status !== "ADVANCED") return result;
@@ -584,7 +726,7 @@ export async function repeatCurrentPrompt(from, state, services = {}) {
     PACKAGE_COUNT: messages.multipleApplicants.packageCount({ max: MAX_MULTI_BENEFICIARIES }),
     BENEFICIARY_NAME: messages.multipleApplicants.beneficiaryName({ number: (state.request?.currentBeneficiaryIndex || 0) + 1 }),
     BENEFICIARY_PHONE: messages.multipleApplicants.beneficiaryPhone,
-    CITY: messages.applicant.city,
+    CITY: usesCombinedDeliveryAddress(state.request?.data) ? messages.applicant.deliveryAddress : messages.applicant.city,
     NOVA_POSHTA_BRANCH: messages.applicant.novaPoshtaBranch,
     RECIPIENT_NAME: messages.applicant.otherRecipientName,
     RECIPIENT_PHONE: messages.applicant.otherRecipientPhone,
@@ -600,19 +742,12 @@ export async function repeatCurrentPrompt(from, state, services = {}) {
   if (state.stage === "MULTI_APPLICANT_INCLUDED") return repeatMultiApplicantIncluded(from);
   if (state.stage === "MULTI_SAVED_DOCUMENTS_DECISION") return repeatMultiSavedDocuments(from);
   if (state.stage === "DOCUMENTS") {
-    const doc = currentDoc(state);
-    const store = activeDocumentStore(state);
-    const hasFiles = Boolean(doc && store?.documents?.[doc.key]?.length);
-    if (hasFiles) {
-      const context = state.request?.multiPackage ? { beneficiaryIndex: state.request.currentBeneficiaryIndex, documentKey: doc.key } : null;
-      return sendDocumentDone(from, doc.label, store.documents[doc.key].length, Boolean(doc.optional), context);
-    }
     return askDocument(from, state);
   }
   if (state.stage === "DOCUMENT_UPDATE_DECISION") return sendYesNoMenu(from, messages.documents.oldDocumentsQuestion, "update_documents_yes", "update_documents_no");
   if (state.stage === "RECIPIENT_CHOICE") return sendYesNoMenu(from, messages.applicant.otherRecipientQuestion, "recipient_other_yes", "recipient_other_no");
   if (state.stage === "CONFIRMATION") return repeatConfirmation(from, state);
-  if (state.stage === "EDIT_MENU") return repeatEditMenu(from, state.request?.type, state.request?.multiPackage);
+  if (state.stage === "EDIT_MENU") return repeatEditMenu(from, state.request?.type, state.request?.multiPackage, usesCombinedDeliveryAddress(state.request?.data));
   if (state.stage === "EDIT_BENEFICIARY_FIELD") return sendBeneficiaryEditFieldMenu(from, (state.editBeneficiaryIndex || 0) + 1);
   if (state.stage === "EDIT_RECIPIENT_CHOICE") return sendYesNoMenu(from, messages.applicant.otherRecipientQuestion, "edit_recipient_other_yes", "edit_recipient_other_no");
   if (state.stage === "EDIT_TEXT") {
@@ -622,7 +757,7 @@ export async function repeatCurrentPrompt(from, state, services = {}) {
     state.stage = "EDIT_MENU";
     await saveUserState(from, state);
     await sendText(from, messages.editing.unknownField);
-    return sendEditMenu(from, state.request?.type, state.request?.multiPackage);
+    return sendEditMenu(from, state.request?.type, state.request?.multiPackage, usesCombinedDeliveryAddress(state.request?.data));
   }
   return sendText(from, messages.navigation.continueCurrentStep);
 }
@@ -640,7 +775,14 @@ export async function applyEditedField(from, state, text, services = {}) {
     logRejectedNeed("EDIT_TEXT", text);
     return (services.sendText || sendText)(from, NEED_TOO_LONG_MESSAGE);
   }
-  state.request.data[editedField] = text;
+  if (editedField === "deliveryAddress") {
+    const address = String(text || "").trim();
+    if (!address) return (services.sendText || sendText)(from, messages.applicant.deliveryAddressEmpty);
+    if (!requestNeedFitsSheets(address)) return (services.sendText || sendText)(from, DELIVERY_ADDRESS_TOO_LONG_MESSAGE);
+    setCombinedDeliveryAddress(state.request.data, address);
+  } else {
+    state.request.data[editedField] = text;
+  }
   if (editedField === "name" && state.request.multiPackage && state.request.beneficiaries?.[0]?.isApplicant) {
     state.request.beneficiaries[0].name = text;
   }
@@ -654,7 +796,35 @@ export async function openEditMenu(from, state, services = {}) {
   const showEditMenu = services.sendEditMenu || sendEditMenu;
   state.stage = "EDIT_MENU";
   await persistState(from, state);
-  return showEditMenu(from, state.request.type, state.request.multiPackage);
+  return showEditMenu(from, state.request.type, state.request.multiPackage, usesCombinedDeliveryAddress(state.request.data));
+}
+
+export async function acceptDeliveryAddress(from, state, text, services = {}) {
+  const address = String(text || "").trim();
+  const notify = services.sendText || sendText;
+  if (!address) {
+    await notify(from, messages.applicant.deliveryAddressEmpty);
+    return { status: "EMPTY" };
+  }
+  if (!requestNeedFitsSheets(address)) {
+    await notify(from, DELIVERY_ADDRESS_TOO_LONG_MESSAGE);
+    return { status: "TOO_LONG" };
+  }
+  setCombinedDeliveryAddress(state.request.data, address);
+  state.stage = "RECIPIENT_CHOICE";
+  await (services.saveUserState || saveUserState)(from, state);
+  await (services.sendYesNoMenu || sendYesNoMenu)(from, messages.applicant.otherRecipientQuestion, "recipient_other_yes", "recipient_other_no");
+  return { status: "ACCEPTED", state };
+}
+
+export async function acceptLegacyDeliveryCity(from, state, text, services = {}) {
+  const city = String(text || "").trim();
+  if (!city) return { status: "EMPTY" };
+  state.request.data.city = city;
+  state.stage = "NOVA_POSHTA_BRANCH";
+  await (services.saveUserState || saveUserState)(from, state);
+  await (services.sendText || sendText)(from, messages.applicant.novaPoshtaBranch);
+  return { status: "ACCEPTED", state };
 }
 
 async function allocateNextApplicationId(assertClaimOwnership) {
@@ -685,6 +855,7 @@ export async function confirmRequest(from, state, assertClaimOwnership, services
   };
   const request = state.request;
   assertRequestNeedWithinSheetsLimit(request);
+  assertRequestDeliveryAddressWithinSheetsLimit(request);
   assertRequestDocumentsHaveValidation(request);
   await assertClaimOwnership();
   let persistedConfirmationData = false;
@@ -830,6 +1001,17 @@ export async function sendConfirmationFailure(from, state, assertClaimOwnership,
     return { failed: true, needsShorterNeed: true };
   }
 
+  if (error?.code === "DELIVERY_ADDRESS_TOO_LONG") {
+    await assertClaimOwnership();
+    state.stage = "EDIT_TEXT";
+    state.editField = "deliveryAddress";
+    await (services.persistState || saveUserState)(from, state);
+    await assertClaimOwnership();
+    await sendFailureText(from, DELIVERY_ADDRESS_TOO_LONG_MESSAGE);
+    await assertClaimOwnership();
+    return { failed: true, needsShorterDeliveryAddress: true };
+  }
+
   await assertClaimOwnership();
   if (applicationId) {
     const lookup = await lookupRequest(applicationId);
@@ -944,6 +1126,7 @@ export async function runClaimedConfirmation(from, dependencies = {}) {
     if (latestState?.stage !== "CONFIRMATION" || !latestState.request) return { stale: true };
     try {
       assertRequestNeedWithinSheetsLimit(latestState.request);
+      assertRequestDeliveryAddressWithinSheetsLimit(latestState.request);
       await assertClaimOwnership();
       try {
         await sendProcessingStarted(from, messages.confirmation.processing);
@@ -1013,6 +1196,10 @@ export default async function handler(req, res) {
     if (await restartRequestWithUnvalidatedDocuments(from, state)) return res.status(200).send("EVENT_RECEIVED");
     if (await handleDocumentStageFallback(from, state, { message, text, buttonId, fileId })) return res.status(200).send("EVENT_RECEIVED");
     if (!text && !buttonId && !fileId) {
+      if (state.stage === "CITY" || (state.stage === "EDIT_TEXT" && state.editField === "deliveryAddress")) {
+        await sendText(from, messages.applicant.deliveryAddressEmpty);
+        return res.status(200).send("EVENT_RECEIVED");
+      }
       if (state.stage === "MULTI_APPLICANT_INCLUDED" || state.stage === "MULTI_SAVED_DOCUMENTS_DECISION") {
         await repeatCurrentPrompt(from, state);
         return res.status(200).send("EVENT_RECEIVED");
@@ -1020,16 +1207,14 @@ export default async function handler(req, res) {
       if (state.stage !== "OPERATOR") await sendText(from, messages.navigation.unsupportedMessage);
       return res.status(200).send("EVENT_RECEIVED");
     }
-    if (state.stage === "OPERATOR" && (buttonId === "back_to_menu" || isMenuCommand(text))) {
-      state.operatorRequested = false; state.stage = "MAIN_MENU"; await saveUserState(from, state);
-      await sendText(from, messages.navigation.returnedToMainMenu); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
+    if (isOperatorReturnAction(state, text, buttonId)) {
+      await returnFromOperatorToMainMenu(from, state); return res.status(200).send("EVENT_RECEIVED");
     }
     if (state.stage === "MAIN_MENU" && isMenuCommand(text)) { await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
 
     if (state.stage === "CANCEL_CONFIRMATION") {
       if (buttonId === "confirm_cancel_request") {
-        await resetUserState(from); state = await createUserState(from); state.stage = "MAIN_MENU"; await saveUserState(from, state);
-        await sendText(from, messages.navigation.requestCancelled); await sendMainMenu(from); return res.status(200).send("EVENT_RECEIVED");
+        state = await completeRequestCancellation(from); return res.status(200).send("EVENT_RECEIVED");
       }
       if (buttonId === "keep_request") {
         state.stage = state.cancelReturnStage; delete state.cancelReturnStage; await saveUserState(from, state);
@@ -1046,8 +1231,9 @@ export default async function handler(req, res) {
       await sendCancelRequestConfirmation(from); return res.status(200).send("EVENT_RECEIVED");
     }
     if (activeRequest && buttonId && !isValidButtonForStage(state, buttonId)) {
-      await sendText(from, messages.navigation.staleButton);
-      await repeatCurrentPrompt(from, state); return res.status(200).send("EVENT_RECEIVED");
+      if (state.stage === "DOCUMENTS" && buttonId.startsWith("document_")) await sendDocumentStepPrompt(from, state, messages.navigation.staleButton);
+      else { await sendText(from, messages.navigation.staleButton); await repeatCurrentPrompt(from, state); }
+      return res.status(200).send("EVENT_RECEIVED");
     }
 
     if (state.stage === "MAIN_MENU" && buttonId === "operator") { state.operatorRequested = true; state.stage = "OPERATOR"; await saveUserState(from, state); await sendOperatorMenu(from); return res.status(200).send("EVENT_RECEIVED"); }
@@ -1123,40 +1309,35 @@ export default async function handler(req, res) {
     if (state.stage === "DOCUMENT_UPDATE_DECISION") { if (buttonId === "update_documents_yes") { state.request.documents = {}; state.request.documentIndex = 0; state.request.usingSavedData = false; state.stage = "DOCUMENTS"; await saveUserState(from, state); await askDocument(from, state); } else if (buttonId === "update_documents_no") await showConfirmation(from, state); else await sendYesNoMenu(from, messages.documents.oldDocumentsQuestion, "update_documents_yes", "update_documents_no"); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "DOCUMENTS") {
       const doc = currentDoc(state); if (!doc) { await askDocument(from, state); return res.status(200).send("EVENT_RECEIVED"); }
-      const store = activeDocumentStore(state); const multiContext = state.request.multiPackage ? { beneficiaryIndex: state.request.currentBeneficiaryIndex, documentKey: doc.key } : null;
       if (fileId) {
-        try {
-          const upload = await saveIncomingDocument(from, state, message, fileId, doc);
-          if (upload.status !== "added") return res.status(200).send("EVENT_RECEIVED");
-          await sendDocumentDone(from, doc.label, upload.count, Boolean(doc.optional), multiContext);
-        } catch (error) {
-          if (!(error instanceof MediaValidationError)) throw error;
-          await sendText(from, error.userMessage);
-        }
+        await handleDocumentFileUpload(from, state, message, fileId, doc);
         return res.status(200).send("EVENT_RECEIVED");
       }
-      const parsedButton = state.request.multiPackage ? parseMultiDocumentButton(buttonId) : null;
-      if (state.request.multiPackage && buttonId?.startsWith("document_") && (!parsedButton || parsedButton.beneficiaryIndex !== state.request.currentBeneficiaryIndex || parsedButton.documentKey !== doc.key)) return res.status(200).send("EVENT_RECEIVED");
-      const donePressed = state.request.multiPackage ? parsedButton?.action === "done" : buttonId === "document_done";
-      const skipPressed = state.request.multiPackage ? parsedButton?.action === "skip" : buttonId === "document_skip";
+      const parsedButton = parseDocumentButton(buttonId);
+      const donePressed = documentButtonMatchesState(state, parsedButton) && parsedButton?.action === "done";
+      const skipPressed = documentButtonMatchesState(state, parsedButton) && parsedButton?.action === "skip";
       if (donePressed || (skipPressed && doc.optional)) {
         const result = await advanceCurrentDocument(from, state, doc, donePressed);
         if (result.status !== "ADVANCED" && result.status !== "BUSY" && result.status !== "EMPTY") await repeatCurrentPrompt(from, result.state || state);
         return res.status(200).send("EVENT_RECEIVED");
       }
     }
-    if (state.stage === "CITY" && text) { state.request.data.city = text; state.stage = "NOVA_POSHTA_BRANCH"; await saveUserState(from, state); await sendText(from, messages.applicant.novaPoshtaBranch); return res.status(200).send("EVENT_RECEIVED"); }
+    if (state.stage === "CITY") {
+      if (usesCombinedDeliveryAddress(state.request?.data)) await acceptDeliveryAddress(from, state, text);
+      else await acceptLegacyDeliveryCity(from, state, text);
+      return res.status(200).send("EVENT_RECEIVED");
+    }
     if (state.stage === "NOVA_POSHTA_BRANCH" && text) { state.request.data.novaPoshtaBranch = text; state.stage = "RECIPIENT_CHOICE"; await saveUserState(from, state); await sendYesNoMenu(from, messages.applicant.otherRecipientQuestion, "recipient_other_yes", "recipient_other_no"); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "RECIPIENT_CHOICE") { if (buttonId === "recipient_other_yes") await recipientChoice(from, state, true); else if (buttonId === "recipient_other_no") await recipientChoice(from, state, false); else await sendYesNoMenu(from, messages.applicant.otherRecipientQuestion, "recipient_other_yes", "recipient_other_no"); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "RECIPIENT_NAME" && text) { state.request.data.recipientName = text; state.stage = "RECIPIENT_PHONE"; await saveUserState(from, state); await sendText(from, messages.applicant.otherRecipientPhone); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "RECIPIENT_PHONE" && text) { state.request.data.recipientPhone = text; await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); }
 
     if (state.stage === "EDIT_MENU") {
-      const prompts = { edit_name: "name", edit_need: "need", edit_unit_number: "militaryUnitNumber", edit_city: "city", edit_np: "novaPoshtaBranch" };
+      const prompts = { edit_name: "name", edit_need: "need", edit_unit_number: "militaryUnitNumber", edit_city: "deliveryAddress", edit_np: "deliveryAddress" };
       if (buttonId === "edit_recipient") { state.stage = "EDIT_RECIPIENT_CHOICE"; await saveUserState(from, state); await sendYesNoMenu(from, messages.applicant.otherRecipientQuestion, "edit_recipient_other_yes", "edit_recipient_other_no"); return res.status(200).send("EVENT_RECEIVED"); }
       if (buttonId === "edit_beneficiary" && state.request.multiPackage) { state.stage = "EDIT_BENEFICIARY_SELECT"; await saveUserState(from, state); await sendText(from, messages.editing.beneficiarySelect({ count: state.request.beneficiaryCount })); return res.status(200).send("EVENT_RECEIVED"); }
       const selected = prompts[buttonId]; if (selected) { state.editField = selected; state.stage = "EDIT_TEXT"; await saveUserState(from, state); await sendText(from, EDIT_FIELD_PROMPTS[selected]); return res.status(200).send("EVENT_RECEIVED"); }
-      await sendEditMenu(from, state.request.type, state.request.multiPackage); return res.status(200).send("EVENT_RECEIVED");
+      await sendEditMenu(from, state.request.type, state.request.multiPackage, usesCombinedDeliveryAddress(state.request.data)); return res.status(200).send("EVENT_RECEIVED");
     }
     if (state.stage === "EDIT_BENEFICIARY_SELECT") { const selected = /^\d+$/.test(text) ? Number(text) - 1 : NaN; if (!Number.isInteger(selected) || selected < 0 || selected >= state.request.beneficiaryCount) { await sendText(from, messages.editing.invalidBeneficiarySelect({ count: state.request.beneficiaryCount })); return res.status(200).send("EVENT_RECEIVED"); } state.editBeneficiaryIndex = selected; state.stage = "EDIT_BENEFICIARY_FIELD"; await saveUserState(from, state); await sendBeneficiaryEditFieldMenu(from, selected + 1); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_BENEFICIARY_FIELD") { if (buttonId === "edit_beneficiary_name" || buttonId === "edit_beneficiary_phone") { state.editBeneficiaryField = buttonId === "edit_beneficiary_name" ? "name" : "phone"; state.stage = "EDIT_BENEFICIARY_TEXT"; await saveUserState(from, state); await sendText(from, state.editBeneficiaryField === "name" ? messages.editing.beneficiaryName : messages.editing.beneficiaryPhone); } else await sendBeneficiaryEditFieldMenu(from, state.editBeneficiaryIndex + 1); return res.status(200).send("EVENT_RECEIVED"); }

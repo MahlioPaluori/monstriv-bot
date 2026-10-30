@@ -340,7 +340,7 @@ for (const version of ["legacy", "category"]) {
         type: "individual",
         documentKey: "passport",
         documentName: "passport.jpg",
-        data: { name: "Applicant", phone: "hidden", need: "Need", city: "City", novaPoshtaBranch: "1", recipientAnotherPerson: false },
+        data: { name: "Applicant", phone: "hidden", need: "Need", city: "Одеса, відділення №15", novaPoshtaBranch: "", deliveryAddressFormat: "combined_v1", recipientAnotherPerson: false },
       },
       {
         title: "Військові частини",
@@ -348,7 +348,7 @@ for (const version of ["legacy", "category"]) {
         type: "military_unit",
         documentKey: "official_request",
         documentName: "official.pdf",
-        data: { name: "Contact", phone: "hidden", need: "Need", militaryUnitNumber: "A1234", city: "City", novaPoshtaBranch: "1", recipientAnotherPerson: false },
+        data: { name: "Contact", phone: "hidden", need: "Need", militaryUnitNumber: "A1234", city: "Одеса, відділення №15", novaPoshtaBranch: "", deliveryAddressFormat: "combined_v1", recipientAnotherPerson: false },
       },
     ];
 
@@ -367,6 +367,8 @@ for (const version of ["legacy", "category"]) {
       const layout = resolveOperatorSheetLayout(item.title, item.headers);
       assert.equal(state.rows[1][layout.applicationIdIndex], "2026-10-0015");
       if (category) assert.equal(state.rows[1][layout.categoryIndex], "");
+      assert.equal(state.rows[1][layout.cityIndex], "Одеса, відділення №15");
+      assert.equal(state.rows[1][layout.novaPoshtaBranchIndex], "");
       assert.equal(state.rows[1][layout.documents[item.documentKey]], item.documentName);
       assert.ok(state.richTextUpdates.some((update) => update.range.startColumnIndex === layout.documents[item.documentKey]
         && update.rows?.[0]?.values?.[0]?.textFormatRuns?.[0]?.format?.link?.uri === "https://example.test/document"));

@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { findRequestByApplicationId } from "../lib/google-sheets.js";
+import { usesCombinedDeliveryAddress } from "../lib/delivery-address.js";
 
 const APPLICATION_ID_PATTERN = /^\d{4}-(0[1-9]|1[0-2])-\d{4}$/;
 const SIGNATURE_PATTERN = /^[a-f0-9]{64}$/i;
@@ -123,6 +124,14 @@ export function requestCardPage(request) {
     : `<div class="shipping-row"><strong>Телефон:</strong> <span>${displayValue(request.actualRecipientPhone)}</span></div>`;
   const multiBeneficiaries = beneficiariesSection(request);
   const requestDocuments = documentsSection(request);
+  const city = String(request.city || "").trim();
+  const novaPoshtaBranch = String(request.novaPoshtaBranch || "").trim();
+  const deliveryAddressRows = usesCombinedDeliveryAddress(request)
+    ? (city ? `<div class="shipping-row"><strong>Адреса доставки:</strong> <span>${displayValue(request.city)}</span></div>` : "")
+    : [
+        city ? `<div class="shipping-row"><strong>Місто:</strong> <span>${displayValue(request.city)}</span></div>` : "",
+        novaPoshtaBranch ? `<div class="shipping-row"><strong>Нова пошта:</strong> <span>${displayValue(request.novaPoshtaBranch)}</span></div>` : "",
+      ].filter(Boolean).join("\n      ");
   return `<!doctype html>
 <html lang="uk">
 <head>
@@ -170,6 +179,7 @@ export function requestCardPage(request) {
     .shipping { border-top: 1px solid #777; padding-top: 11px; }
     .shipping-row { margin: 5px 0; }
     .shipping-row strong { display: inline-block; min-width: 43mm; color: #404040; }
+    .shipping-row span { white-space: pre-wrap; overflow-wrap: anywhere; }
     @media print {
       body { background: #fff; }
       .screen-actions { display: none; }
@@ -203,8 +213,7 @@ export function requestCardPage(request) {
       <h2>ДАНІ ДЛЯ ВІДПРАВКИ</h2>
       <div class="shipping-row"><strong>Отримувач:</strong> <span>${displayValue(request.actualRecipientName)}</span></div>
       ${shippingPhone}
-      <div class="shipping-row"><strong>Місто:</strong> <span>${displayValue(request.city)}</span></div>
-      <div class="shipping-row"><strong>Нова пошта:</strong> <span>${displayValue(request.novaPoshtaBranch)}</span></div>
+      ${deliveryAddressRows}
     </section>
   </main>
 </body>

@@ -3,11 +3,15 @@ import test from "node:test";
 
 import {
   backfillKnownUserMarker,
+  completeRequestCancellation,
   handleMissingStateMessage,
+  isOperatorReturnAction,
+  returnFromOperatorToMainMenu,
   shouldIgnoreWebhookMessage,
   shouldSilenceInactiveMessage,
   startRequestFromMainMenu,
 } from "../api/webhook.js";
+import { messages } from "../lib/messages.js";
 import { initializeUserSession, isKnownUser, markUserKnown, resetUserState } from "../lib/state.js";
 import { sendApplicationAccepted } from "../lib/whatsapp.js";
 
@@ -29,19 +33,22 @@ function missingStateServices({ known = false, applicantProfile = null, military
       };
     },
     getUserState: async () => ({ stage: "MAIN_MENU", request: {} }),
-    sendMainMenu: async () => calls.push(["main-menu"]),
-    sendApplicantTypeMenu: async () => calls.push(["applicant-type"]),
+    sendMainMenu: async (_phone, body) => calls.push(["main-menu", body]),
+    sendApplicantTypeMenu: async (_phone, body) => calls.push(["applicant-type", body]),
     sendOperatorMenu: async () => calls.push(["operator-menu"]),
     sendText: async (_phone, text) => calls.push(["text", text]),
   };
   return { calls, services };
 }
 
-test("a new user's ordinary first message receives the welcome and main menu", async () => {
+test("a new user's ordinary first message receives one combined interactive main menu", async () => {
   const { calls, services } = missingStateServices();
 
   assert.equal(await handleMissingStateMessage("user", { text: "Вітаю" }, services), true);
-  assert.deepEqual(calls.map(([event]) => event), ["initialize", "text", "main-menu"]);
+  assert.deepEqual(calls, [
+    ["initialize", "NORMAL"],
+    ["main-menu", messages.welcome.firstContact],
+  ]);
 });
 
 test("ordinary messages from a known user without state stay silent across repeated delivery", async () => {
@@ -68,11 +75,14 @@ test("an existing applicant or military profile backfills the known-user marker 
 test("menu command and explicit application button work immediately without prior state", async () => {
   const menu = missingStateServices({ known: true });
   await handleMissingStateMessage("user", { text: " /START " }, menu.services);
-  assert.deepEqual(menu.calls, [["initialize", "MENU"], ["main-menu"]]);
+  assert.deepEqual(menu.calls, [["initialize", "MENU"], ["main-menu", undefined]]);
 
   const application = missingStateServices({ known: true });
   await handleMissingStateMessage("user", { buttonId: "send_request" }, application.services);
-  assert.deepEqual(application.calls.map(([event]) => event), ["initialize", "text", "applicant-type"]);
+  assert.deepEqual(application.calls, [
+    ["initialize", "SEND_REQUEST"],
+    ["applicant-type", messages.welcome.directRequest],
+  ]);
 });
 
 function concurrentFirstContactServices() {
@@ -105,21 +115,21 @@ function concurrentFirstContactServices() {
       return structuredClone(state);
     },
     sendText: async () => calls.push("welcome"),
-    sendMainMenu: async () => calls.push("main-menu"),
-    sendApplicantTypeMenu: async () => calls.push("applicant-type"),
+    sendMainMenu: async (_phone, body) => calls.push(["main-menu", body]),
+    sendApplicantTypeMenu: async (_phone, body) => calls.push(["applicant-type", body]),
     sendOperatorMenu: async () => calls.push("operator-menu"),
   };
   return { calls, services, getState: () => state };
 }
 
-test("two concurrent identical first-contact webhooks emit one welcome and one menu", async () => {
+test("two concurrent identical first-contact webhooks emit one combined menu", async () => {
   const context = concurrentFirstContactServices();
   await Promise.all([
     handleMissingStateMessage("user", { text: "Вітаю" }, context.services),
     handleMissingStateMessage("user", { text: "Вітаю" }, context.services),
   ]);
 
-  assert.deepEqual(context.calls, ["welcome", "main-menu"]);
+  assert.deepEqual(context.calls, [["main-menu", messages.welcome.firstContact]]);
   assert.equal(context.getState().stage, "MAIN_MENU");
 });
 
@@ -131,7 +141,7 @@ test("a concurrent send_request wins over ordinary first-contact without a stale
   ]);
 
   assert.equal(context.getState().stage, "APPLICANT_TYPE");
-  assert.deepEqual(context.calls, ["welcome", "applicant-type"]);
+  assert.deepEqual(context.calls, [["applicant-type", messages.welcome.directRequest]]);
 });
 
 test("NEW state recovery preserves request data and supports menu then send_request", async () => {
@@ -170,6 +180,72 @@ test("ordinary input recovers a legacy NEW state silently", async () => {
 
   await handleMissingStateMessage("user", { text: "операторський текст", recoveringNewState: true }, services);
   assert.deepEqual(calls, []);
+});
+
+test("ROUTED send_request uses the standard applicant menu without the combined introduction", async () => {
+  const calls = [];
+  await handleMissingStateMessage("user", { buttonId: "send_request" }, {
+    initializeUserSession: async () => ({ status: "ROUTED", state: { stage: "APPLICANT_TYPE", request: {} } }),
+    sendApplicantTypeMenu: async (_phone, body) => calls.push(["applicant-type", body]),
+  });
+
+  assert.deepEqual(calls, [["applicant-type", undefined]]);
+});
+
+test("operator return persists MAIN_MENU and sends one combined menu", async () => {
+  assert.equal(isOperatorReturnAction({ stage: "OPERATOR" }, "/menu", null), true);
+  assert.equal(isOperatorReturnAction({ stage: "OPERATOR" }, "", "back_to_menu"), true);
+  assert.equal(isOperatorReturnAction({ stage: "OPERATOR" }, "звичайний текст", null), false);
+  assert.equal(isOperatorReturnAction({ stage: "MAIN_MENU" }, "/menu", null), false);
+
+  const calls = [];
+  const state = { stage: "OPERATOR", operatorRequested: true, request: null };
+  await returnFromOperatorToMainMenu("user", state, {
+    saveUserState: async (_phone, savedState) => calls.push(["save", structuredClone(savedState)]),
+    sendMainMenu: async (_phone, body) => calls.push(["main-menu", body]),
+  });
+
+  assert.equal(state.stage, "MAIN_MENU");
+  assert.equal(state.operatorRequested, false);
+  assert.deepEqual(calls, [
+    ["save", { stage: "MAIN_MENU", operatorRequested: false, request: null }],
+    ["main-menu", messages.navigation.returnedToMainMenu],
+  ]);
+});
+
+test("confirmed cancellation resets each request type and sends one combined menu without touching known marker", async () => {
+  for (const request of [
+    { type: "individual", multiPackage: false },
+    { type: "military_unit" },
+    { type: "individual", multiPackage: true },
+  ]) {
+    const calls = [];
+    let activeRequest = structuredClone(request);
+    const freshState = { stage: "NEW", request: { type: null, data: { phone: "user" }, documents: {}, documentIndex: 0 } };
+    const state = await completeRequestCancellation("user", {
+      resetUserState: async () => {
+        assert.deepEqual(activeRequest, request);
+        activeRequest = null;
+        calls.push(["reset"]);
+      },
+      createUserState: async () => {
+        assert.equal(activeRequest, null);
+        calls.push(["create"]);
+        return freshState;
+      },
+      saveUserState: async (_phone, savedState) => calls.push(["save", structuredClone(savedState)]),
+      sendMainMenu: async (_phone, body) => calls.push(["main-menu", body]),
+    });
+
+    assert.equal(state.stage, "MAIN_MENU");
+    assert.deepEqual(calls, [
+      ["reset"],
+      ["create"],
+      ["save", { stage: "MAIN_MENU", request: { type: null, data: { phone: "user" }, documents: {}, documentIndex: 0 } }],
+      ["main-menu", messages.navigation.requestCancelled],
+    ]);
+    assert.equal(calls.some(([event]) => event === "mark-known" || event === "delete-known"), false);
+  }
 });
 
 test("atomic session initialization cannot leave a marker through separate SET calls", async () => {

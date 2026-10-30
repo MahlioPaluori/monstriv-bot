@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { messages } from "../lib/messages.js";
 import { sendApplicantTypeMenu, sendMainMenu } from "../lib/whatsapp.js";
 
-async function captureMenu(sendMenu) {
+async function captureMenu(sendMenu, body) {
   const previousPhoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const previousToken = process.env.WHATSAPP_ACCESS_TOKEN;
   const previousFetch = globalThis.fetch;
@@ -15,7 +16,7 @@ async function captureMenu(sendMenu) {
     return { ok: true, json: async () => ({ messages: [{ id: "mock-message" }] }) };
   };
   try {
-    await sendMenu("test-recipient");
+    await sendMenu("test-recipient", body);
     return request;
   } finally {
     globalThis.fetch = previousFetch;
@@ -50,4 +51,24 @@ test("main menu explains the bot purpose without changing its actions", async ()
     { type: "reply", reply: { id: "send_request", title: "📤 Відправити запит" } },
     { type: "reply", reply: { id: "operator", title: "💬 Написати оператору" } },
   ]);
+});
+
+test("optimized menus use exact combined bodies without changing interactive button IDs", async () => {
+  for (const body of [
+    messages.welcome.firstContact,
+    messages.navigation.returnedToMainMenu,
+    messages.navigation.requestCancelled,
+  ]) {
+    const payload = await captureMenu(sendMainMenu, body);
+    assert.equal(payload.type, "interactive");
+    assert.equal(payload.interactive.type, "button");
+    assert.equal(payload.interactive.body.text, body);
+    assert.deepEqual(payload.interactive.action.buttons.map((button) => button.reply.id), ["send_request", "operator"]);
+  }
+
+  const applicantPayload = await captureMenu(sendApplicantTypeMenu, messages.welcome.directRequest);
+  assert.equal(applicantPayload.type, "interactive");
+  assert.equal(applicantPayload.interactive.type, "button");
+  assert.equal(applicantPayload.interactive.body.text, messages.welcome.directRequest);
+  assert.deepEqual(applicantPayload.interactive.action.buttons.map((button) => button.reply.id), ["individual", "military_unit"]);
 });

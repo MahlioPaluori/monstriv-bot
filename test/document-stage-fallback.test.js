@@ -11,6 +11,7 @@ function documentState(documentIndex, documents = {}) {
       multiPackage: false,
       data: { name: "Test" },
       documentIndex,
+      documentActionToken: "aabbccddeeff",
       documents,
     },
   };
@@ -77,9 +78,11 @@ test("numeric RNOKPP text requests a photo or PDF and repeats the RNOKPP prompt 
   const before = structuredClone(state);
   const { handled, payloads } = await captureDocumentTextResponse(state, "1234567890");
   assert.equal(handled, true);
-  assert.equal(payloads.length, 2);
-  assert.equal(payloads[0].text.body, "📸 Будь ласка, надішліть фото документа, а не його номер або текст.\n\nМи очікуємо саме фотографію документа. Також можна надіслати PDF-файл.");
-  assert.match(payloads[1].text.body, /^📸 Надішліть фото РНОКПП/);
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].type, "interactive");
+  assert.match(payloads[0].interactive.body.text, /^Будь ласка, надішліть фото або PDF-файл замість тексту\./);
+  assert.match(payloads[0].interactive.body.text, /РНОКПП/);
+  assert.equal(payloads[0].interactive.action.buttons[0].reply.id, "document_done_taabbccddeeff_rnokpp");
   assert.deepEqual(state, before);
   assert.equal(state.request.documentIndex, 1);
   assert.deepEqual(state.request.documents.passport, passport);
@@ -90,9 +93,9 @@ test("arbitrary passport text gets the same explanation and repeats the passport
   const before = structuredClone(state);
   const { handled, payloads } = await captureDocumentTextResponse(state, "це мій паспорт");
   assert.equal(handled, true);
-  assert.match(payloads[0].text.body, /надішліть фото документа, а не його номер або текст/);
-  assert.match(payloads[0].text.body, /PDF-файл/);
-  assert.match(payloads[1].text.body, /^📸 Надішліть фото першої сторінки паспорта/);
+  assert.equal(payloads.length, 1);
+  assert.match(payloads[0].interactive.body.text, /надішліть фото або PDF-файл замість тексту/i);
+  assert.match(payloads[0].interactive.body.text, /📕 \*Паспорт\*/);
   assert.deepEqual(state, before);
 });
 

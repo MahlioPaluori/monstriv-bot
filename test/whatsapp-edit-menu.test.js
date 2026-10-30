@@ -103,7 +103,7 @@ test("confirmation edit callback enters EDIT_MENU without losing request data", 
   assert.equal(state.request.documents.passport[0].driveFileId, "file-1");
   assert.deepEqual(calls, [
     ["save", "phone", "EDIT_MENU"],
-    ["menu", "phone", "individual", false],
+    ["menu", "phone", "individual", false, false],
   ]);
 });
 
@@ -134,7 +134,16 @@ test("an existing EDIT_MENU state resumes through the production prompt router",
   await repeatCurrentPrompt("phone", state, {
     sendEditMenu: async (...args) => { calls.push(args); },
   });
-  assert.deepEqual(calls, [["phone", "individual", false]]);
+  assert.deepEqual(calls, [["phone", "individual", false, false]]);
   assert.equal(state.stage, "EDIT_MENU");
   assert.equal(state.request.data.need, "Saved");
+});
+
+test("a combined-address EDIT_MENU recovery keeps one delivery field", async () => {
+  const calls = [];
+  const state = { stage: "EDIT_MENU", request: { type: "individual", multiPackage: false, data: { deliveryAddressFormat: "combined_v1" } } };
+  await repeatCurrentPrompt("phone", state, {
+    sendEditMenu: async (...args) => { calls.push(args); },
+  });
+  assert.deepEqual(calls, [["phone", "individual", false, true]]);
 });

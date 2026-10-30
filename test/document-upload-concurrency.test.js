@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { advanceCurrentDocument, saveIncomingDocument } from "../api/webhook.js";
-import { sendDocumentDone } from "../lib/whatsapp.js";
+import { advanceCurrentDocument, handleDocumentFileUpload, saveIncomingDocument } from "../api/webhook.js";
 
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
 
@@ -28,8 +27,10 @@ function coordinator(initialState) {
     advance: async (_phone, context) => {
       if (inFlight.size) return { status: "BUSY" };
       const store = context.beneficiaryIndex === null ? current.request : current.request.beneficiaries[context.beneficiaryIndex];
+      if (store.documentIndex !== context.documentIndex) return { status: "STALE", state: clone(current) };
       const files = store.documents[context.documentKey] || [];
       if (context.requireFiles && !files.length) return { status: "EMPTY", state: clone(current) };
+      delete store.documentActionToken;
       store.documentIndex += 1;
       return { status: "ADVANCED", state: clone(current) };
     },
@@ -47,6 +48,8 @@ function uploadServices(control, delays = {}) {
     beginDocumentUpload: control.begin,
     completeDocumentUpload: control.complete,
     failDocumentUpload: control.fail,
+    renewDocumentUpload: async () => true,
+    ownsDocumentUpload: async () => true,
     downloadWhatsAppMedia: async (fileId) => {
       if (delays[fileId]) await delays[fileId];
       return { buffer: Buffer.from(fileId), mimeType: "image/jpeg", fileSize: fileId.length, extension: ".jpg", validation: { version: 1 } };
@@ -85,7 +88,7 @@ test("document_done cannot advance while an upload is unfinished", async () => {
   const upload = saveIncomingDocument("phone", clone(initial), { id: "message-1", type: "image" }, "first", { key: "passport" }, uploadServices(control, { first: pending }));
   await Promise.resolve();
   const notifications = [];
-  const busy = await advanceCurrentDocument("phone", clone(initial), { key: "passport", uploadPrompt: "passport" }, true, { advanceDocumentStage: control.advance, sendText: async (_phone, text) => notifications.push(text), askDocument: async () => assert.fail("busy transition must not continue") });
+  const busy = await advanceCurrentDocument("phone", clone(initial), { key: "passport", uploadPrompt: "passport" }, true, { advanceDocumentStage: control.advance, sendDocumentStepPrompt: async (_phone, _state, issue) => notifications.push(issue), askDocument: async () => assert.fail("busy transition must not continue") });
   assert.equal(busy.status, "BUSY");
   assert.match(notifications[0], /триває завантаження/);
   assert.equal(control.state().request.documentIndex, 0);
@@ -110,6 +113,25 @@ test("a repeated webhook does not upload or append the same file twice", async (
   assert.equal(control.state().request.documents.passport.length, 1);
 });
 
+test("two Done callbacks advance a document step only once", async () => {
+  const initial = baseState();
+  initial.request.documents.passport = [{ mediaId: "saved" }];
+  initial.request.documentActionToken = "aabbccddeeff";
+  const control = coordinator(initial);
+  const continuations = [];
+  const services = {
+    advanceDocumentStage: control.advance,
+    askDocument: async (_phone, state) => continuations.push(state.request.documentIndex),
+  };
+  const [first, second] = await Promise.all([
+    advanceCurrentDocument("phone", clone(initial), { key: "passport" }, true, services),
+    advanceCurrentDocument("phone", clone(initial), { key: "passport" }, true, services),
+  ]);
+  assert.deepEqual([first.status, second.status].sort(), ["ADVANCED", "STALE"]);
+  assert.equal(control.state().request.documentIndex, 1);
+  assert.equal(continuations.length, 1);
+});
+
 test("single, military and multi uploads append to the correct document collection", async () => {
   for (const [kind, key] of [["single", "passport"], ["military", "official_request"], ["multi", "passport"]]) {
     const initial = baseState(kind);
@@ -121,24 +143,37 @@ test("single, military and multi uploads append to the correct document collecti
   }
 });
 
-test("every successful photo acknowledgement includes the current file count and Done button", async () => {
-  const previousPhoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const previousToken = process.env.WHATSAPP_ACCESS_TOKEN;
-  const previousFetch = globalThis.fetch;
-  const payloads = [];
-  process.env.WHATSAPP_PHONE_NUMBER_ID = "test-phone";
-  process.env.WHATSAPP_ACCESS_TOKEN = "test-token";
-  globalThis.fetch = async (_url, options) => { payloads.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ messages: [{ id: "sent" }] }) }; };
-  try {
-    await sendDocumentDone("phone", "📕 Паспорт", 1);
-    await sendDocumentDone("phone", "📕 Паспорт", 2);
-  } finally {
-    globalThis.fetch = previousFetch;
-    if (previousPhoneId === undefined) delete process.env.WHATSAPP_PHONE_NUMBER_ID; else process.env.WHATSAPP_PHONE_NUMBER_ID = previousPhoneId;
-    if (previousToken === undefined) delete process.env.WHATSAPP_ACCESS_TOKEN; else process.env.WHATSAPP_ACCESS_TOKEN = previousToken;
-  }
-  assert.equal(payloads.length, 2);
-  assert.match(payloads[0].interactive.body.text, /Усього файлів цього документа: 1/);
-  assert.match(payloads[1].interactive.body.text, /Усього файлів цього документа: 2/);
-  assert.equal(payloads[1].interactive.action.buttons[0].reply.id, "document_done");
+test("one or several successful files are stored without per-file WhatsApp acknowledgements", async () => {
+  const uploads = [];
+  const outbound = [];
+  const services = {
+    saveIncomingDocument: async (_phone, _state, message) => {
+      uploads.push(message.id);
+      return { status: "added", count: uploads.length };
+    },
+    sendText: async (_phone, text) => outbound.push(text),
+  };
+
+  const state = baseState();
+  state.request.documentActionToken = "aabbccddeeff";
+  assert.equal((await handleDocumentFileUpload("phone", state, { id: "one", type: "image" }, "media-one", { key: "passport" }, services)).status, "added");
+  assert.equal((await handleDocumentFileUpload("phone", state, { id: "two", type: "document" }, "media-two", { key: "passport" }, services)).status, "added");
+  assert.deepEqual(uploads, ["one", "two"]);
+  assert.deepEqual(outbound, []);
+});
+
+test("a Google Drive failure leaves the document stage and collection unchanged", async () => {
+  const initial = baseState();
+  const control = coordinator(initial);
+  const services = {
+    ...uploadServices(control),
+    uploadBufferToDrive: async () => { throw new Error("mock Drive failure"); },
+  };
+
+  await assert.rejects(
+    saveIncomingDocument("phone", clone(initial), { id: "failed-message", type: "image" }, "failed-media", { key: "passport" }, services),
+    /mock Drive failure/,
+  );
+  assert.equal(control.state().stage, "DOCUMENTS");
+  assert.deepEqual(control.state().request.documents, {});
 });
