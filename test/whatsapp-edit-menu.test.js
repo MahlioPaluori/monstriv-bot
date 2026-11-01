@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyEditedField, getInteractiveReplyId, openEditMenu, repeatCurrentPrompt } from "../api/webhook.js";
+import { applyEditedField, getEditFieldForButton, getInteractiveReplyId, openEditMenu, repeatCurrentPrompt } from "../api/webhook.js";
 import { sendEditMenu } from "../lib/whatsapp.js";
 
 async function captureEditMenu(type, multiPackage = false) {
@@ -43,8 +43,7 @@ test("sendEditMenu builds a valid list for an individual single request", async 
   assertValidEditList(await captureEditMenu("individual", false), [
     { id: "edit_name", title: "ПІБ" },
     { id: "edit_need", title: "Потребу" },
-    { id: "edit_city", title: "Місто" },
-    { id: "edit_np", title: "Нову пошту" },
+    { id: "edit_delivery_address", title: "📦 Адреса доставки" },
     { id: "edit_recipient", title: "Отримувача" },
   ]);
 });
@@ -54,8 +53,7 @@ test("sendEditMenu adds only the beneficiary row for an individual multi request
   assertValidEditList(payload, [
     { id: "edit_name", title: "ПІБ" },
     { id: "edit_need", title: "Потребу" },
-    { id: "edit_city", title: "Місто" },
-    { id: "edit_np", title: "Нову пошту" },
+    { id: "edit_delivery_address", title: "📦 Адреса доставки" },
     { id: "edit_recipient", title: "Отримувача" },
     { id: "edit_beneficiary", title: "Дані особи" },
   ]);
@@ -67,8 +65,7 @@ test("sendEditMenu adds only the unit-number row for a military request", async 
     { id: "edit_name", title: "ПІБ" },
     { id: "edit_unit_number", title: "Номер ВЧ" },
     { id: "edit_need", title: "Потребу" },
-    { id: "edit_city", title: "Місто" },
-    { id: "edit_np", title: "Нову пошту" },
+    { id: "edit_delivery_address", title: "📦 Адреса доставки" },
     { id: "edit_recipient", title: "Отримувача" },
   ]);
 });
@@ -77,6 +74,12 @@ test("list reply IDs use the existing callback normalization", () => {
   assert.equal(getInteractiveReplyId({ interactive: { list_reply: { id: "edit_need" } } }), "edit_need");
   assert.equal(getInteractiveReplyId({ interactive: { button_reply: { id: "edit_name" } } }), "edit_name");
   assert.equal(getInteractiveReplyId({ button: { payload: "edit_city" } }), "edit_city");
+});
+
+test("new and legacy delivery callback IDs use the combined address editor", () => {
+  assert.equal(getEditFieldForButton("edit_delivery_address"), "deliveryAddress");
+  assert.equal(getEditFieldForButton("edit_city"), "deliveryAddress");
+  assert.equal(getEditFieldForButton("edit_np"), "deliveryAddress");
 });
 
 test("confirmation edit callback enters EDIT_MENU without losing request data", async () => {
@@ -103,7 +106,7 @@ test("confirmation edit callback enters EDIT_MENU without losing request data", 
   assert.equal(state.request.documents.passport[0].driveFileId, "file-1");
   assert.deepEqual(calls, [
     ["save", "phone", "EDIT_MENU"],
-    ["menu", "phone", "individual", false, false],
+    ["menu", "phone", "individual", false],
   ]);
 });
 
@@ -128,22 +131,22 @@ test("editing a field returns the request to confirmation without losing its dat
   assert.equal("editField" in state, false);
 });
 
-test("an existing EDIT_MENU state resumes through the production prompt router", async () => {
+test("a legacy EDIT_MENU state resumes with the unified delivery field", async () => {
   const calls = [];
   const state = { stage: "EDIT_MENU", request: { type: "individual", multiPackage: false, data: { need: "Saved" } } };
   await repeatCurrentPrompt("phone", state, {
     sendEditMenu: async (...args) => { calls.push(args); },
   });
-  assert.deepEqual(calls, [["phone", "individual", false, false]]);
+  assert.deepEqual(calls, [["phone", "individual", false]]);
   assert.equal(state.stage, "EDIT_MENU");
   assert.equal(state.request.data.need, "Saved");
 });
 
-test("a combined-address EDIT_MENU recovery keeps one delivery field", async () => {
+test("a combined-address EDIT_MENU recovery uses the same unified menu", async () => {
   const calls = [];
   const state = { stage: "EDIT_MENU", request: { type: "individual", multiPackage: false, data: { deliveryAddressFormat: "combined_v1" } } };
   await repeatCurrentPrompt("phone", state, {
     sendEditMenu: async (...args) => { calls.push(args); },
   });
-  assert.deepEqual(calls, [["phone", "individual", false, true]]);
+  assert.deepEqual(calls, [["phone", "individual", false]]);
 });

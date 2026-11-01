@@ -14,8 +14,10 @@ import {
 import { requestCardPage } from "../api/request-card.js";
 import {
   COMBINED_DELIVERY_ADDRESS_FORMAT,
+  formatDeliveryAddressForCombinedWorkflow,
   inferStoredDeliveryAddressFormat,
   normalizeDeliveryAddress,
+  prepareDeliveryAddressDataForReuse,
 } from "../lib/delivery-address.js";
 import { assertRequestDeliveryAddressWithinSheetsLimit, normalizeRequestRow } from "../lib/google-sheets.js";
 import { sendEditMenu } from "../lib/whatsapp.js";
@@ -59,6 +61,54 @@ test("new address workflow is marked before waiting for CITY input", () => {
   assert.equal(state.stage, "CITY");
   assert.equal(state.request.data.deliveryAddressFormat, COMBINED_DELIVERY_ADDRESS_FORMAT);
   assert.equal(state.request.data.city, undefined);
+});
+
+test("legacy saved profile address is combined for request reuse without mutating the profile", () => {
+  const profileData = {
+    name: "Applicant",
+    city: "Одеса",
+    novaPoshtaBranch: "Відділення №15",
+    recipientAnotherPerson: false,
+  };
+  const original = structuredClone(profileData);
+  const reused = prepareDeliveryAddressDataForReuse(profileData);
+
+  assert.deepEqual(profileData, original);
+  assert.notEqual(reused, profileData);
+  assert.equal(reused.city, "Одеса, Відділення №15");
+  assert.equal(reused.novaPoshtaBranch, "");
+  assert.equal(reused.deliveryAddressFormat, COMBINED_DELIVERY_ADDRESS_FORMAT);
+  assert.equal(reused.name, "Applicant");
+  assert.equal(reused.recipientAnotherPerson, false);
+});
+
+test("saved city-only and combined profiles remain usable without duplication", () => {
+  const cityOnly = { city: "Одеса", novaPoshtaBranch: "" };
+  const combined = { city: "Одеса, відділення №15", novaPoshtaBranch: "", deliveryAddressFormat: COMBINED_DELIVERY_ADDRESS_FORMAT };
+  const duplicatedLegacy = { city: "Одеса, відділення №15", novaPoshtaBranch: "Відділення №15" };
+
+  assert.deepEqual(prepareDeliveryAddressDataForReuse(cityOnly), {
+    city: "Одеса",
+    novaPoshtaBranch: "",
+    deliveryAddressFormat: COMBINED_DELIVERY_ADDRESS_FORMAT,
+  });
+  assert.deepEqual(prepareDeliveryAddressDataForReuse(combined), combined);
+  assert.equal(formatDeliveryAddressForCombinedWorkflow(duplicatedLegacy), "Одеса, відділення №15");
+  assert.equal(prepareDeliveryAddressDataForReuse(duplicatedLegacy).city, "Одеса, відділення №15");
+});
+
+test("generic delivery words do not hide a different legacy branch and formatting is preserved", () => {
+  const profileData = {
+    city: "Одеса\nНова пошта: уточнити адресу",
+    novaPoshtaBranch: "Відділення №15",
+  };
+  const original = structuredClone(profileData);
+  const reused = prepareDeliveryAddressDataForReuse(profileData);
+
+  assert.deepEqual(profileData, original);
+  assert.equal(reused.city, "Одеса\nНова пошта: уточнити адресу, Відділення №15");
+  assert.equal(reused.novaPoshtaBranch, "");
+  assert.equal(reused.deliveryAddressFormat, COMBINED_DELIVERY_ADDRESS_FORMAT);
 });
 
 test("empty and oversized delivery addresses do not mutate or advance the request", async () => {
@@ -109,20 +159,40 @@ test("an oversized restored address returns to safe editing without losing reque
   assert.equal(notices.length, 1);
 });
 
-test("editing a delivery address migrates old delivery fields without truncation", async () => {
+test("editing a delivery address accepts multiline text and migrates old delivery fields without truncation", async () => {
   const state = requestState();
   state.stage = "EDIT_TEXT";
   state.editField = "deliveryAddress";
   state.request.data.city = "Одеса";
   state.request.data.novaPoshtaBranch = "15";
   let confirmationState;
-  await applyEditedField("phone", state, " Київ, НП 23 ", {
+  await applyEditedField("phone", state, " Київська область\nБуча\nвідділення №23 ", {
     showConfirmation: async (_phone, value) => { confirmationState = structuredClone(value); },
   });
-  assert.equal(confirmationState.request.data.city, "Київ, НП 23");
+  assert.equal(confirmationState.request.data.city, "Київська область\nБуча\nвідділення №23");
   assert.equal(confirmationState.request.data.novaPoshtaBranch, "");
   assert.equal(confirmationState.request.data.deliveryAddressFormat, COMBINED_DELIVERY_ADDRESS_FORMAT);
   assert.equal(confirmationState.editField, undefined);
+});
+
+test("legacy EDIT_TEXT address fields use the combined editor and preserve unrelated request data", async () => {
+  for (const editField of ["city", "novaPoshtaBranch"]) {
+    const state = requestState();
+    state.stage = "EDIT_TEXT";
+    state.editField = editField;
+    state.request.data.city = "Одеса";
+    state.request.data.novaPoshtaBranch = "Відділення №15";
+    state.request.data.need = "Existing need";
+    await applyEditedField("phone", state, "Львів\nвідділення №7", {
+      showConfirmation: async (_phone, current) => { current.stage = "CONFIRMATION"; },
+    });
+    assert.equal(state.stage, "CONFIRMATION");
+    assert.equal(state.request.data.city, "Львів\nвідділення №7");
+    assert.equal(state.request.data.novaPoshtaBranch, "");
+    assert.equal(state.request.data.deliveryAddressFormat, COMBINED_DELIVERY_ADDRESS_FORMAT);
+    assert.equal(state.request.data.need, "Existing need");
+    assert.equal(state.editField, undefined);
+  }
 });
 
 test("legacy CITY recovery keeps the two-step prompt while marked CITY uses the combined prompt", async () => {
@@ -146,6 +216,14 @@ test("legacy CITY recovery keeps the two-step prompt while marked CITY uses the 
     legacyBranch.stage = "NOVA_POSHTA_BRANCH";
     legacyBranch.request.data.city = "Одеса";
     await repeatCurrentPrompt("phone", legacyBranch);
+    const legacyEdit = requestState();
+    legacyEdit.stage = "EDIT_TEXT";
+    legacyEdit.editField = "city";
+    legacyEdit.request.data.city = "Одеса";
+    legacyEdit.request.data.novaPoshtaBranch = "Відділення №15";
+    const originalLegacyEdit = structuredClone(legacyEdit);
+    await repeatCurrentPrompt("phone", legacyEdit);
+    assert.deepEqual(legacyEdit, originalLegacyEdit);
   } finally {
     globalThis.fetch = previousFetch;
     if (previousPhoneId === undefined) delete process.env.WHATSAPP_PHONE_NUMBER_ID; else process.env.WHATSAPP_PHONE_NUMBER_ID = previousPhoneId;
@@ -154,6 +232,7 @@ test("legacy CITY recovery keeps the two-step prompt while marked CITY uses the 
   assert.match(prompts[0], /місто/);
   assert.match(prompts[1], /Адреса доставки/);
   assert.match(prompts[2], /відділення Нової пошти/);
+  assert.match(prompts[3], /Поточна адреса:\nОдеса, Відділення №15/);
 });
 
 test("legacy CITY answer remains city-only and continues to the branch step", async () => {
@@ -262,7 +341,7 @@ test("request cards support heuristic-free fallback and omit empty delivery fiel
   assert.doesNotMatch(explicitMarker, /Нова пошта:<\/strong>/);
 });
 
-test("new-format edit menus expose one delivery row and keep legacy callback IDs compatible", async () => {
+test("edit menus always expose one semantic delivery-address row", async () => {
   const previousPhoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const previousToken = process.env.WHATSAPP_ACCESS_TOKEN;
   const previousFetch = globalThis.fetch;
@@ -271,12 +350,13 @@ test("new-format edit menus expose one delivery row and keep legacy callback IDs
   process.env.WHATSAPP_ACCESS_TOKEN = "test-token";
   globalThis.fetch = async (_url, options) => { payload = JSON.parse(options.body); return { ok: true, json: async () => ({}) }; };
   try {
-    await sendEditMenu("phone", "military_unit", false, true);
+    await sendEditMenu("phone", "military_unit", false);
   } finally {
     globalThis.fetch = previousFetch;
     if (previousPhoneId === undefined) delete process.env.WHATSAPP_PHONE_NUMBER_ID; else process.env.WHATSAPP_PHONE_NUMBER_ID = previousPhoneId;
     if (previousToken === undefined) delete process.env.WHATSAPP_ACCESS_TOKEN; else process.env.WHATSAPP_ACCESS_TOKEN = previousToken;
   }
   const rows = payload.interactive.action.sections[0].rows;
-  assert.deepEqual(rows.filter(({ id }) => id === "edit_city" || id === "edit_np"), [{ id: "edit_city", title: "Адресу доставки" }]);
+  assert.deepEqual(rows.filter(({ id }) => id === "edit_delivery_address"), [{ id: "edit_delivery_address", title: "📦 Адреса доставки" }]);
+  assert.equal(rows.some(({ id }) => id === "edit_city" || id === "edit_np"), false);
 });

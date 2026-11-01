@@ -30,7 +30,7 @@ import {
 import { downloadWhatsAppMedia } from "../lib/meta-media.js";
 import { filterValidatedDocuments, isValidatedDocument, MediaValidationError } from "../lib/media-validation.js";
 import { messages } from "../lib/messages.js";
-import { markCombinedDeliveryAddressWorkflow, setCombinedDeliveryAddress, usesCombinedDeliveryAddress } from "../lib/delivery-address.js";
+import { formatDeliveryAddressForCombinedWorkflow, markCombinedDeliveryAddressWorkflow, prepareDeliveryAddressDataForReuse, setCombinedDeliveryAddress, usesCombinedDeliveryAddress } from "../lib/delivery-address.js";
 import { createCanonicalApplicantDocumentCopies, finalizeIndividualMultiRequestDocuments, finalizeMilitaryRequestDocuments, getOrCreateApplicantFolder, getOrCreateIndividualMultiBeneficiaryFolder, uploadBufferToDrive } from "../lib/google-drive.js";
 import { appendConfirmedMultiRequest, appendConfirmedRequest, assertRequestDeliveryAddressWithinSheetsLimit, assertRequestNeedWithinSheetsLimit, findRequestByApplicationId, getMaxApplicationSequenceForPeriod, MAX_SHEETS_CELL_CHARACTERS, sheetsTextLength, updateMilitaryRequestDocumentLinks } from "../lib/google-sheets.js";
 import {
@@ -63,6 +63,14 @@ const REQUIRED_PHYSICAL_DOCUMENT_KEYS = PHYSICAL_DOCUMENTS.filter((doc) => !doc.
 const MENU_COMMANDS = new Set(["/menu", "меню", "/start", "start", "старт"]);
 const ICE_BREAKER_TEXT = "натисніть на це повідомлення, щоб почати";
 const EDIT_FIELD_PROMPTS = messages.editing.fieldPrompts;
+const EDIT_FIELD_BY_BUTTON = Object.freeze({
+  edit_name: "name",
+  edit_need: "need",
+  edit_unit_number: "militaryUnitNumber",
+  edit_delivery_address: "deliveryAddress",
+  edit_city: "deliveryAddress",
+  edit_np: "deliveryAddress",
+});
 const NEED_TOO_LONG_MESSAGE = messages.confirmation.needTooLong({ limit: MAX_SHEETS_CELL_CHARACTERS });
 const DELIVERY_ADDRESS_TOO_LONG_MESSAGE = messages.applicant.deliveryAddressTooLong({ limit: MAX_SHEETS_CELL_CHARACTERS });
 
@@ -593,7 +601,7 @@ function isValidButtonForStage(state, buttonId) {
     return Boolean(documentButtonMatchesState(state, parsed) && (parsed.action === "done" || (parsed.action === "skip" && doc?.optional)));
   }
   if (state.stage === "EDIT_MENU") {
-    const valid = ["edit_name", "edit_need", "edit_city", "edit_np", "edit_recipient"];
+    const valid = ["edit_name", "edit_need", "edit_delivery_address", "edit_city", "edit_np", "edit_recipient"];
     if (state.request?.type === "military_unit") valid.push("edit_unit_number");
     if (state.request?.multiPackage) valid.push("edit_beneficiary");
     return valid.includes(buttonId);
@@ -747,17 +755,17 @@ export async function repeatCurrentPrompt(from, state, services = {}) {
   if (state.stage === "DOCUMENT_UPDATE_DECISION") return sendYesNoMenu(from, messages.documents.oldDocumentsQuestion, "update_documents_yes", "update_documents_no");
   if (state.stage === "RECIPIENT_CHOICE") return sendYesNoMenu(from, messages.applicant.otherRecipientQuestion, "recipient_other_yes", "recipient_other_no");
   if (state.stage === "CONFIRMATION") return repeatConfirmation(from, state);
-  if (state.stage === "EDIT_MENU") return repeatEditMenu(from, state.request?.type, state.request?.multiPackage, usesCombinedDeliveryAddress(state.request?.data));
+  if (state.stage === "EDIT_MENU") return repeatEditMenu(from, state.request?.type, state.request?.multiPackage);
   if (state.stage === "EDIT_BENEFICIARY_FIELD") return sendBeneficiaryEditFieldMenu(from, (state.editBeneficiaryIndex || 0) + 1);
   if (state.stage === "EDIT_RECIPIENT_CHOICE") return sendYesNoMenu(from, messages.applicant.otherRecipientQuestion, "edit_recipient_other_yes", "edit_recipient_other_no");
   if (state.stage === "EDIT_TEXT") {
-    const prompt = EDIT_FIELD_PROMPTS[state.editField];
+    const prompt = editFieldPrompt(state);
     if (prompt) return sendText(from, prompt);
     delete state.editField;
     state.stage = "EDIT_MENU";
     await saveUserState(from, state);
     await sendText(from, messages.editing.unknownField);
-    return sendEditMenu(from, state.request?.type, state.request?.multiPackage, usesCombinedDeliveryAddress(state.request?.data));
+    return sendEditMenu(from, state.request?.type, state.request?.multiPackage);
   }
   return sendText(from, messages.navigation.continueCurrentStep);
 }
@@ -769,8 +777,24 @@ export function getInteractiveReplyId(message) {
     || null;
 }
 
+export function getEditFieldForButton(buttonId) {
+  return EDIT_FIELD_BY_BUTTON[buttonId] || null;
+}
+
+function normalizedEditField(editField) {
+  return editField === "city" || editField === "novaPoshtaBranch" ? "deliveryAddress" : editField;
+}
+
+function editFieldPrompt(state, editField = normalizedEditField(state.editField)) {
+  if (editField !== "deliveryAddress") return EDIT_FIELD_PROMPTS[editField];
+  const currentAddress = formatDeliveryAddressForCombinedWorkflow(state.request?.data);
+  return currentAddress
+    ? `${EDIT_FIELD_PROMPTS.deliveryAddress}\n\nПоточна адреса:\n${currentAddress}`
+    : EDIT_FIELD_PROMPTS.deliveryAddress;
+}
+
 export async function applyEditedField(from, state, text, services = {}) {
-  const editedField = state.editField;
+  const editedField = normalizedEditField(state.editField);
   if (editedField === "need" && !requestNeedFitsSheets(text)) {
     logRejectedNeed("EDIT_TEXT", text);
     return (services.sendText || sendText)(from, NEED_TOO_LONG_MESSAGE);
@@ -796,7 +820,7 @@ export async function openEditMenu(from, state, services = {}) {
   const showEditMenu = services.sendEditMenu || sendEditMenu;
   state.stage = "EDIT_MENU";
   await persistState(from, state);
-  return showEditMenu(from, state.request.type, state.request.multiPackage, usesCombinedDeliveryAddress(state.request.data));
+  return showEditMenu(from, state.request.type, state.request.multiPackage);
 }
 
 export async function acceptDeliveryAddress(from, state, text, services = {}) {
@@ -1188,7 +1212,7 @@ export default async function handler(req, res) {
     if (await restartRequestWithUnvalidatedDocuments(from, state)) return res.status(200).send("EVENT_RECEIVED");
     if (await handleDocumentStageFallback(from, state, { message, text, buttonId, fileId })) return res.status(200).send("EVENT_RECEIVED");
     if (!text && !buttonId && !fileId) {
-      if (state.stage === "CITY" || (state.stage === "EDIT_TEXT" && state.editField === "deliveryAddress")) {
+      if (state.stage === "CITY" || (state.stage === "EDIT_TEXT" && normalizedEditField(state.editField) === "deliveryAddress")) {
         await sendText(from, messages.applicant.deliveryAddressEmpty);
         return res.status(200).send("EVENT_RECEIVED");
       }
@@ -1250,7 +1274,7 @@ export default async function handler(req, res) {
       if (!profile) { state.stage = "IDENTIFICATION"; await saveUserState(from, state); await sendText(from, messages.applicant.identifyIndividual); return res.status(200).send("EVENT_RECEIVED"); }
       if (buttonId === "use_saved_data") {
         const reuse = prepareSavedDocumentsForReuse(profile.documents);
-        state.request.type = "individual"; state.request.data = { ...(profile.data || {}), phone: from }; state.request.documents = reuse.documents; state.request.documentIndex = 0; state.request.savedDocumentsUpdatedAt = profile.lastDocumentsUpdatedAt; state.request.usingSavedData = true; state.request.legacyDocumentsRequireUpload = reuse.legacyDocumentsRequireUpload; state.stage = "REQUEST_TYPE"; await saveUserState(from, state);
+        state.request.type = "individual"; state.request.data = { ...prepareDeliveryAddressDataForReuse(profile.data), phone: from }; state.request.documents = reuse.documents; state.request.documentIndex = 0; state.request.savedDocumentsUpdatedAt = profile.lastDocumentsUpdatedAt; state.request.usingSavedData = true; state.request.legacyDocumentsRequireUpload = reuse.legacyDocumentsRequireUpload; state.stage = "REQUEST_TYPE"; await saveUserState(from, state);
         if (state.request.legacyDocumentsRequireUpload) await sendText(from, messages.applicant.legacySavedDocuments);
         await sendText(from, messages.applicant.savedDataUsed); return res.status(200).send("EVENT_RECEIVED");
       }
@@ -1325,11 +1349,10 @@ export default async function handler(req, res) {
     if (state.stage === "RECIPIENT_PHONE" && text) { state.request.data.recipientPhone = text; await showConfirmation(from, state); return res.status(200).send("EVENT_RECEIVED"); }
 
     if (state.stage === "EDIT_MENU") {
-      const prompts = { edit_name: "name", edit_need: "need", edit_unit_number: "militaryUnitNumber", edit_city: "deliveryAddress", edit_np: "deliveryAddress" };
       if (buttonId === "edit_recipient") { state.stage = "EDIT_RECIPIENT_CHOICE"; await saveUserState(from, state); await sendYesNoMenu(from, messages.applicant.otherRecipientQuestion, "edit_recipient_other_yes", "edit_recipient_other_no"); return res.status(200).send("EVENT_RECEIVED"); }
       if (buttonId === "edit_beneficiary" && state.request.multiPackage) { state.stage = "EDIT_BENEFICIARY_SELECT"; await saveUserState(from, state); await sendText(from, messages.editing.beneficiarySelect({ count: state.request.beneficiaryCount })); return res.status(200).send("EVENT_RECEIVED"); }
-      const selected = prompts[buttonId]; if (selected) { state.editField = selected; state.stage = "EDIT_TEXT"; await saveUserState(from, state); await sendText(from, EDIT_FIELD_PROMPTS[selected]); return res.status(200).send("EVENT_RECEIVED"); }
-      await sendEditMenu(from, state.request.type, state.request.multiPackage, usesCombinedDeliveryAddress(state.request.data)); return res.status(200).send("EVENT_RECEIVED");
+      const selected = getEditFieldForButton(buttonId); if (selected) { state.editField = selected; state.stage = "EDIT_TEXT"; await saveUserState(from, state); await sendText(from, editFieldPrompt(state, selected)); return res.status(200).send("EVENT_RECEIVED"); }
+      await sendEditMenu(from, state.request.type, state.request.multiPackage); return res.status(200).send("EVENT_RECEIVED");
     }
     if (state.stage === "EDIT_BENEFICIARY_SELECT") { const selected = /^\d+$/.test(text) ? Number(text) - 1 : NaN; if (!Number.isInteger(selected) || selected < 0 || selected >= state.request.beneficiaryCount) { await sendText(from, messages.editing.invalidBeneficiarySelect({ count: state.request.beneficiaryCount })); return res.status(200).send("EVENT_RECEIVED"); } state.editBeneficiaryIndex = selected; state.stage = "EDIT_BENEFICIARY_FIELD"; await saveUserState(from, state); await sendBeneficiaryEditFieldMenu(from, selected + 1); return res.status(200).send("EVENT_RECEIVED"); }
     if (state.stage === "EDIT_BENEFICIARY_FIELD") { if (buttonId === "edit_beneficiary_name" || buttonId === "edit_beneficiary_phone") { state.editBeneficiaryField = buttonId === "edit_beneficiary_name" ? "name" : "phone"; state.stage = "EDIT_BENEFICIARY_TEXT"; await saveUserState(from, state); await sendText(from, state.editBeneficiaryField === "name" ? messages.editing.beneficiaryName : messages.editing.beneficiaryPhone); } else await sendBeneficiaryEditFieldMenu(from, state.editBeneficiaryIndex + 1); return res.status(200).send("EVENT_RECEIVED"); }
