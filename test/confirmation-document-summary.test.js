@@ -7,6 +7,7 @@ import {
   formatDocumentSummary,
   repeatCurrentPrompt,
 } from "../api/webhook.js";
+import { messages } from "../lib/messages.js";
 
 function files(count) { return Array.from({ length: count }, (_, index) => ({ driveFileId: `file-${index + 1}` })); }
 
@@ -23,6 +24,33 @@ function singleState(documents, extraRequest = {}) {
     },
   };
 }
+
+test("all confirmation workflows show the registration wait warning before confirmation", () => {
+  assert.match(messages.confirmation.confirmQuestion, /⏳ Після підтвердження зачекайте, будь ласка\./);
+  assert.match(messages.confirmation.confirmQuestion, /Реєстрація заявки може тривати деякий час\./);
+
+  const workflows = [
+    singleState({ passport: files(1) }),
+    {
+      request: {
+        type: "military_unit",
+        multiPackage: false,
+        data: { name: "Контакт", militaryUnitNumber: "А1234", need: "Запит" },
+        documents: { official_request: files(1) },
+      },
+    },
+    {
+      request: {
+        type: "individual",
+        multiPackage: true,
+        data: { name: "Заявник", phone: "380000000000", need: "Допомога" },
+        beneficiaries: [{ name: "Особа", phone: "111", documents: { passport: files(1) } }],
+      },
+    },
+  ];
+
+  for (const state of workflows) assert.ok(buildConfirmationMessages("380000000000", state).length > 0);
+});
 
 test("single confirmation lists only uploaded categories and counts multiple photos", () => {
   const text = formatConfirmationSummary(singleState({ passport: files(1), rnokpp: files(1), military_id: files(2), ubd: files(1) }));

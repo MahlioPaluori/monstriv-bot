@@ -161,7 +161,7 @@ test("two concurrent confirmation callbacks execute the protected work once", as
   assert.equal(executions, 1);
 });
 
-test("the claim owner sends one processing message and one success path while a concurrent callback stays silent", async () => {
+test("the claim owner sends no processing message and one success path while a concurrent callback stays silent", async () => {
   const state = { stage: "CONFIRMATION", request: {} };
   const harness = confirmationHarness(state);
   const messages = [];
@@ -188,29 +188,25 @@ test("the claim owner sends one processing message and one success path while a 
   });
   releaseWork();
   assert.deepEqual(await first, { completed: true });
-  assert.equal(messages.filter((message) => message.includes("Реєструємо")).length, 1);
-  assert.deepEqual(messages, [
-    "⏳ Реєструємо вашу заявку. Будь ласка, зачекайте на підтвердження.",
-    "success",
-  ]);
+  assert.deepEqual(messages, ["success"]);
 });
 
-test("a processing-message timeout does not prevent the claim owner from completing registration", async () => {
+test("the removed processing-message sender is not called and registration still completes", async () => {
   const state = { stage: "CONFIRMATION", request: {} };
   const harness = confirmationHarness(state);
   let completed = false;
+  let processingMessages = 0;
   const result = await runClaimedConfirmation("380000000015", {
     ...harness,
     ownerToken: "owner-a",
     sendProcessingStarted: async () => {
-      const error = new Error("possible delivery timeout");
-      error.code = "ETIMEDOUT";
-      throw error;
+      processingMessages += 1;
     },
     performConfirmation: async () => { completed = true; state.stage = "MAIN_MENU"; },
   });
   assert.deepEqual(result, { completed: true });
   assert.equal(completed, true);
+  assert.equal(processingMessages, 0);
 });
 
 test("retry after application ID persistence reuses state, and completed callbacks are stale", async () => {

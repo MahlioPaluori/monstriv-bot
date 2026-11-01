@@ -1089,7 +1089,6 @@ export async function runClaimedConfirmation(from, dependencies = {}) {
   const loadState = dependencies.loadState || getUserState;
   const performConfirmation = dependencies.performConfirmation || confirmRequest;
   const handleFailure = dependencies.handleFailure || sendConfirmationFailure;
-  const sendProcessingStarted = dependencies.sendProcessingStarted || sendText;
   const ownerToken = dependencies.ownerToken || randomUUID();
   const heartbeatMs = dependencies.heartbeatMs || Math.max(1000, Math.floor(CONFIRMATION_CLAIM_TTL_SECONDS * 1000 / 3));
   const acquired = await acquireClaim(from, ownerToken);
@@ -1128,13 +1127,6 @@ export async function runClaimedConfirmation(from, dependencies = {}) {
       assertRequestNeedWithinSheetsLimit(latestState.request);
       assertRequestDeliveryAddressWithinSheetsLimit(latestState.request);
       await assertClaimOwnership();
-      try {
-        await sendProcessingStarted(from, messages.confirmation.processing);
-      } catch (error) {
-        confirmationLog("confirmation_processing_message_failed", latestState.request, {
-          errorCode: error?.code || "UNKNOWN",
-        });
-      }
       await assertClaimOwnership();
       await performConfirmation(from, latestState, assertClaimOwnership, dependencies.confirmationServices);
       return { completed: true };
