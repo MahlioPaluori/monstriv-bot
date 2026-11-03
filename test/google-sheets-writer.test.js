@@ -7,13 +7,16 @@ import {
   categoryNamedRangeRequest,
   categoryValidationRequest,
   ensureOperatorSheetStructure,
+  ensureOperatorHeaderProtection,
   findApplicationRowsInSpreadsheet,
   INITIAL_REQUEST_CATEGORIES,
   isExpectedCategoryNamedRange,
   newMonthlySpreadsheetSheets,
+  operatorHeaderProtectionRequest,
   operatorSheetValidationRequests,
   resolveOperatorSheetLayout,
   runWithSheetWriteLease,
+  tryEnsureOperatorHeaderProtection,
   writeConfirmedMultiRequest,
   writeConfirmedSingleRequest,
 } from "../lib/google-sheets.js";
@@ -238,6 +241,198 @@ test("new monthly sheets receive initial validation for status and category", ()
     assert.deepEqual(requests.map((request) => request.setDataValidation.range.startColumnIndex), [0, 1]);
     assert.equal(requests[1].setDataValidation.rule.condition.type, "ONE_OF_LIST");
   }
+});
+
+function headerProtectionMock({ protectedByTitle = {}, oauthEmail = "office@monstrov.org", batchError, aboutError, headersOverride = {} } = {}) {
+  const batchRequests = [];
+  const headersByTitle = {
+    "Фізособи": CATEGORY_HEADERS,
+    "Військові частини": MILITARY_CATEGORY_HEADERS,
+    "Довідники": ["Категорія запиту"],
+    ...headersOverride,
+  };
+  const sheets = [
+    { properties: { sheetId: 7, title: "Фізособи" }, protectedRanges: protectedByTitle["Фізособи"] || [] },
+    { properties: { sheetId: 8, title: "Військові частини" }, protectedRanges: protectedByTitle["Військові частини"] || [] },
+    { properties: { sheetId: 9, title: "Довідники" }, protectedRanges: protectedByTitle["Довідники"] || [] },
+  ];
+  const sheetsApi = {
+    spreadsheets: {
+      get: async () => ({ data: { sheets } }),
+      values: {
+        get: async ({ range }) => {
+          const title = Object.keys(headersByTitle).find((candidate) => range.startsWith(`'${candidate}'!`));
+          return { data: { values: title ? [headersByTitle[title]] : [] } };
+        },
+      },
+      batchUpdate: async ({ requestBody }) => {
+        if (batchError) throw batchError;
+        batchRequests.push(...requestBody.requests);
+        return { data: {} };
+      },
+    },
+  };
+  const driveApi = { about: { get: async () => {
+    if (aboutError) throw aboutError;
+    return { data: { user: { emailAddress: oauthEmail } } };
+  } } };
+  return { sheetsApi, driveApi, batchRequests };
+}
+
+async function captureConsoleErrors(operation) {
+  const original = console.error;
+  const entries = [];
+  console.error = (...args) => entries.push(args.join(" "));
+  try {
+    return { result: await operation(), entries };
+  } finally {
+    console.error = original;
+  }
+}
+
+test("new monthly spreadsheet header protection is restrictive and owner-only", async () => {
+  const { sheetsApi, driveApi, batchRequests } = headerProtectionMock();
+  const result = await ensureOperatorHeaderProtection("spreadsheet", { sheetsApi, driveApi });
+
+  assert.deepEqual(result, { added: 3, existing: 0 });
+  assert.equal(batchRequests.length, 3);
+  assert.deepEqual(batchRequests.map((request) => request.addProtectedRange.protectedRange.range), [
+    { sheetId: 7, startRowIndex: 0, endRowIndex: 1 },
+    { sheetId: 8, startRowIndex: 0, endRowIndex: 1 },
+    { sheetId: 9, startRowIndex: 0, endRowIndex: 1 },
+  ]);
+  for (const request of batchRequests) {
+    const protection = request.addProtectedRange.protectedRange;
+    assert.equal(protection.warningOnly, false);
+    assert.deepEqual(protection.editors, { users: ["office@monstrov.org"] });
+  }
+});
+
+test("repeated header protection check does not duplicate protected ranges", async () => {
+  const protectedByTitle = Object.fromEntries([
+    ["Фізособи", 7],
+    ["Військові частини", 8],
+    ["Довідники", 9],
+  ].map(([title, sheetId]) => [title, [{
+    protectedRangeId: sheetId + 100,
+    ...operatorHeaderProtectionRequest(sheetId, title).addProtectedRange.protectedRange,
+  }]]));
+  const { sheetsApi, driveApi, batchRequests } = headerProtectionMock({ protectedByTitle });
+
+  const result = await ensureOperatorHeaderProtection("spreadsheet", { sheetsApi, driveApi });
+
+  assert.deepEqual(result, { added: 0, existing: 3 });
+  assert.deepEqual(batchRequests, []);
+});
+
+test("header protection refuses an unexpected OAuth user before Sheets mutation", async () => {
+  const { sheetsApi, driveApi, batchRequests } = headerProtectionMock({ oauthEmail: "other@example.test" });
+  await assert.rejects(
+    ensureOperatorHeaderProtection("spreadsheet", { sheetsApi, driveApi }),
+    (error) => error.code === "GOOGLE_SHEETS_PROTECTION_OWNER_MISMATCH",
+  );
+  assert.deepEqual(batchRequests, []);
+});
+
+test("Google API failure while adding header protection is propagated", async () => {
+  const googleError = Object.assign(new Error("Google API rejected addProtectedRange"), { code: 403 });
+  const { sheetsApi, driveApi, batchRequests } = headerProtectionMock({ batchError: googleError });
+  await assert.rejects(
+    ensureOperatorHeaderProtection("spreadsheet", { sheetsApi, driveApi }),
+    (error) => error === googleError,
+  );
+  assert.deepEqual(batchRequests, []);
+});
+
+test("non-structural header protection failures are logged safely and do not block table use", async () => {
+  for (const status of [403, 429, 503]) {
+    const secretMessage = `private-token-${status}`;
+    const googleError = Object.assign(new Error(secretMessage), { response: { status } });
+    const { sheetsApi, driveApi } = headerProtectionMock({ batchError: googleError });
+    const { result, entries } = await captureConsoleErrors(() => tryEnsureOperatorHeaderProtection("spreadsheet-id", { sheetsApi, driveApi }));
+    assert.equal(result.protected, false);
+    assert.equal(result.errorCode, `GOOGLE_API_${status}`);
+    assert.equal(entries.length, 1);
+    const log = JSON.parse(entries[0]);
+    assert.equal(log.event, "sheets_header_protection_failed");
+    assert.equal(log.spreadsheetId, "spreadsheet-id");
+    assert.deepEqual(log.sheetNames, ["Фізособи", "Військові частини", "Довідники"]);
+    assert.equal(entries[0].includes(secretMessage), false);
+  }
+});
+
+test("OAuth identity lookup failure is recoverable and does not expose its message", async () => {
+  const aboutError = new Error("oauth-secret-value");
+  const { sheetsApi, driveApi } = headerProtectionMock({ aboutError });
+  const { result, entries } = await captureConsoleErrors(() => tryEnsureOperatorHeaderProtection("spreadsheet-id", { sheetsApi, driveApi }));
+  assert.equal(result.protected, false);
+  assert.equal(result.errorCode, "OAUTH_IDENTITY_CHECK_FAILED");
+  assert.equal(entries[0].includes("oauth-secret-value"), false);
+});
+
+test("OAuth owner mismatch is recoverable without installing a weaker protection", async () => {
+  const { sheetsApi, driveApi, batchRequests } = headerProtectionMock({ oauthEmail: "other@example.test" });
+  const { result, entries } = await captureConsoleErrors(() => tryEnsureOperatorHeaderProtection("spreadsheet-id", { sheetsApi, driveApi }));
+  assert.equal(result.protected, false);
+  assert.equal(result.errorCode, "GOOGLE_SHEETS_PROTECTION_OWNER_MISMATCH");
+  assert.deepEqual(batchRequests, []);
+  assert.equal(entries[0].includes("other@example.test"), false);
+});
+
+test("conflicting ProtectedRange is reported without replacing or weakening it", async () => {
+  const protectedByTitle = {
+    "Фізособи": [{ protectedRangeId: 17, range: { sheetId: 7, startRowIndex: 0, endRowIndex: 1 }, warningOnly: true }],
+  };
+  const { sheetsApi, driveApi, batchRequests } = headerProtectionMock({ protectedByTitle });
+  const { result } = await captureConsoleErrors(() => tryEnsureOperatorHeaderProtection("spreadsheet-id", { sheetsApi, driveApi }));
+  assert.equal(result.protected, false);
+  assert.equal(result.errorCode, "SHEETS_HEADER_PROTECTION_CONFLICT");
+  assert.deepEqual(batchRequests, []);
+});
+
+test("missing P1 remains fail-closed with safe exact header diagnostics", async () => {
+  const { sheetsApi, driveApi, batchRequests } = headerProtectionMock({
+    headersOverride: { "Фізособи": CATEGORY_HEADERS.slice(0, -1) },
+  });
+  const original = console.error;
+  const entries = [];
+  console.error = (...args) => entries.push(args.join(" "));
+  try {
+    await assert.rejects(
+      tryEnsureOperatorHeaderProtection("spreadsheet-id", { sheetsApi, driveApi }),
+      (error) => error.code === "SHEETS_UNKNOWN_LAYOUT",
+    );
+  } finally {
+    console.error = original;
+  }
+  assert.deepEqual(batchRequests, []);
+  const diagnostic = entries.map((entry) => JSON.parse(entry)).find((entry) => entry.event === "sheets_unknown_layout");
+  assert.deepEqual(diagnostic, {
+    event: "sheets_unknown_layout",
+    spreadsheetId: "spreadsheet-id",
+    sheetName: "Фізособи",
+    layoutType: "category",
+    cell: "P1",
+    expected: "Телефон отримувача",
+    actual: "EMPTY",
+  });
+});
+
+test("unknown header content is never copied into diagnostics", async () => {
+  const privateHeader = "private-personal-value";
+  const headers = [...CATEGORY_HEADERS];
+  headers[15] = privateHeader;
+  const { sheetsApi, driveApi } = headerProtectionMock({ headersOverride: { "Фізособи": headers } });
+  const captured = [];
+  const original = console.error;
+  console.error = (...args) => captured.push(args.join(" "));
+  try {
+    await assert.rejects(ensureOperatorHeaderProtection("spreadsheet-id", { sheetsApi, driveApi }), (error) => error.code === "SHEETS_UNKNOWN_LAYOUT");
+  } finally {
+    console.error = original;
+  }
+  assert.equal(captured.join("\n").includes(privateHeader), false);
+  assert.equal(captured.join("\n").includes('"actual":"MISMATCH"'), true);
 });
 
 test("existing monthly spreadsheet structure check preserves category and other manual validation rules", async () => {
