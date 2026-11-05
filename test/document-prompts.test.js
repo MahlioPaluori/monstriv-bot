@@ -3,6 +3,8 @@ import test from "node:test";
 
 import { advanceCurrentDocument, repeatCurrentPrompt } from "../api/webhook.js";
 
+const PHOTO_QUALITY_WARNING = "Фото документів мають бути ЧІТКИМИ та ЧИТАБЕЛЬНИМИ. Інакше Ваш запит буде відхилено.";
+
 async function capturePrompt(state) {
   const previousPhoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const previousToken = process.env.WHATSAPP_ACCESS_TOKEN;
@@ -56,8 +58,11 @@ test("document recovery prompts clearly request a photo for every supported docu
     assert.equal(payload.interactive.type, "button");
     const body = payload.interactive.body.text;
     assert.ok(body.startsWith(expectedPrompt), `${type}/${index}: ${body}`);
+    assert.match(body, new RegExp(`\\n\\n${PHOTO_QUALITY_WARNING.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n\\n`));
+    assert.equal(body.split(PHOTO_QUALITY_WARNING).length - 1, 1);
     assert.match(body, /не більше 5 МБ/);
     assert.match(body, /натисніть \*«Готово»\*/);
+    assert.ok(body.length <= 1024, `${type}/${index}: interactive body exceeds 1024 characters`);
     assert.equal(payload.interactive.action.buttons[0].reply.id, `document_done_taabbccddeeff_${type === "military_unit" ? "official_request" : ["passport", "rnokpp", "military_id", "ubd"][index]}`);
   }
 });
